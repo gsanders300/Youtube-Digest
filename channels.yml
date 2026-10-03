@@ -1,0 +1,9 @@
+channels:
+- handle: '@ericwtech'
+  title: Eric Tech
+  id: UCOXRjenlq9PmlTqd_JhAbMQ
+  uploads_playlist_id: UUOXRjenlq9PmlTqd_JhAbMQ
+  digest: true
+- '@3blue1brown'
+- handle: '@GoogleDevelopers'
+  digest: false

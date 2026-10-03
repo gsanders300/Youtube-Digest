@@ -1,0 +1,43 @@
+name: Add Channel
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "YouTube channel URL (https://www.youtube.com/@Name or .../channel/UC...)"
+        type: string
+        required: true
+
+jobs:
+  add:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --no-dev
+
+      - name: Add channel
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          CHANNEL_URL: ${{ inputs.url }}
+        run: uv run --frozen --no-dev python add_channel.py "$CHANNEL_URL"
+
+      - name: Commit and push if changed
+        env:
+          CHANNEL_URL: ${{ inputs.url }}
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add channels.yml
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Add channel ${CHANNEL_URL} to channels.yml" && git push)

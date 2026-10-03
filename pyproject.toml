@@ -1,0 +1,25 @@
+[project]
+name = "ytnotifier"
+version = "0.1.0"
+description = "YouTube Daily Digest and Subscription Manager"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "google-api-python-client",
+    "google-auth-oauthlib",
+    "google-auth-httplib2",
+    "google-genai",
+    "PyYAML",
+    "isodate",
+    "pydantic>=2.0.0",
+    "tzdata>=2026.3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-mock>=3.14.0",
+]
+
+[tool.uv]
+package = false

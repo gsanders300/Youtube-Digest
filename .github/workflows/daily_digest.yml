@@ -1,0 +1,96 @@
+name: YouTube Daily Digest
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --no-dev
+
+      - name: Run digest script
+        id: digest
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+        run: uv run --frozen --no-dev python digest.py
+
+      - name: Create issue on failure
+        if: failure() && steps.digest.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue_title = '⚠️ YouTube Daily Digest Failed';
+            const issue_body = `## Daily Digest Workflow Failed
+            
+            The **YouTube Daily Digest** workflow encountered an error.
+            
+            ### Error Details
+            - **Workflow Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            - **Time:** ${{ github.event.repository.updated_at }}
+            - **Branch:** ${{ github.ref_name }}
+            
+            ### Possible Causes
+            - Missing or invalid API keys (YouTube, Gemini)
+            - Gmail authentication issues
+            - API quota exceeded
+            - Network connectivity problems
+            
+            ### How to Diagnose
+            
+            1. **Check the workflow logs:** [View Run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            2. **Verify all secrets are set:**
+               - \`YOUTUBE_API_KEY\`
+               - \`GEMINI_API_KEY\`
+               - \`GMAIL_USER\`
+               - \`GMAIL_APP_PASSWORD\`
+               - \`RECIPIENT_EMAIL\`
+            3. **Test locally:**
+               \`\`\`bash
+               uv run python digest.py
+               \`\`\`
+            
+            ### Next Steps
+            - Review the error message in the workflow logs
+            - Verify API keys and quotas
+            - Test the script locally to reproduce the issue
+            - Close this issue once resolved
+            
+            ---
+            *This issue was automatically created by the Daily Digest workflow.*`;
+            
+            // Check if an issue already exists
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['digest-error']
+            });
+            
+            if (issues.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issue_title,
+                body: issue_body,
+                labels: ['digest-error', 'automated']
+              });
+            }

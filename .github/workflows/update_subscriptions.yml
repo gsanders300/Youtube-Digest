@@ -1,0 +1,94 @@
+name: Update Subscriptions
+
+on:
+  workflow_dispatch: # Allows manual trigger
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --no-dev
+
+      - name: Fetch Subscriptions
+        id: fetch
+        env:
+          YOUTUBE_CREDENTIALS: ${{ secrets.YOUTUBE_CREDENTIALS }}
+        run: uv run --frozen --no-dev python get_subscriptions.py
+
+      - name: Commit and push if changed
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add channels.yml
+          git diff --quiet && git diff --staged --quiet || (git commit -m "Update subscriptions in channels.yml" && git push)
+
+      - name: Create issue on credential failure
+        if: failure() && steps.fetch.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issue_title = '🔐 YouTube Credentials Need Renewal';
+            const issue_body = `## Credentials Error Detected
+            
+            The **Update Subscriptions** workflow failed, likely due to expired or invalid YouTube OAuth credentials.
+            
+            ### Error Details
+            - **Workflow Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            - **Time:** ${{ github.event.repository.updated_at }}
+            - **Branch:** ${{ github.ref_name }}
+            
+            ### How to Fix
+            
+            1. **Run the OAuth flow locally:**
+               \`\`\`bash
+               uv run python get_subscriptions.py
+               \`\`\`
+            
+            2. **Complete the browser authentication**
+            
+            3. **Copy the JSON output** between the dashed lines
+            
+            4. **Update the GitHub Secret:**
+               - Go to [Repository Secrets](/${{ github.repository }}/settings/secrets/actions)
+               - Update \`YOUTUBE_CREDENTIALS\` with the new JSON
+            
+            5. **Close this issue** once the credentials are updated
+            
+            ### Common Causes
+            - OAuth refresh token expired (typically after 6 months of inactivity)
+            - User revoked access to the application
+            - Invalid credential format in GitHub Secrets
+            
+            ---
+            *This issue was automatically created by the Update Subscriptions workflow.*`;
+            
+            // Check if an issue already exists
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['credentials-error']
+            });
+            
+            if (issues.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issue_title,
+                body: issue_body,
+                labels: ['credentials-error', 'automated']
+              });
+            }
