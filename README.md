@@ -1,5 +1,11 @@
 # YTNotifier
 
+[![Tests](https://github.com/gsanders300/Youtube-Digest/actions/workflows/tests.yml/badge.svg)](https://github.com/gsanders300/Youtube-Digest/actions/workflows/tests.yml)
+[![Latest release](https://img.shields.io/github/v/release/gsanders300/Youtube-Digest)](https://github.com/gsanders300/Youtube-Digest/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/gsanders300/Youtube-Digest)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
+[![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
+
 YTNotifier is a Python tool. It runs in GitHub Actions. Each day, it sends one email to you. The email lists the new videos from the YouTube channels that you select. Gemini AI writes a short summary of each video.
 
 This document tells you how to install the tool, how to configure it, and how to run each command.
@@ -256,7 +262,7 @@ See section 3.1.
 
 ## 5. Run the workflows in GitHub Actions
 
-The project has four workflows. Each workflow starts only when you start it by hand. No workflow has a schedule.
+The project has four workflows for the digest. Each of these workflows starts only when you start it by hand. No workflow has a schedule. A fifth workflow, **Tests**, runs the tests automatically on each push to `main` and on each pull request. It needs no secrets.
 
 | Workflow name | What it does | Input | Secrets that it needs |
 |---|---|---|---|

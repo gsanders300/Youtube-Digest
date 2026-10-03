@@ -206,7 +206,7 @@ Write commit messages in the imperative mood. Example: "Add type hints to digest
 
 ### 7.2 GitHub Actions
 
-The project has four workflows in `.github/workflows/`:
+The project has five workflows in `.github/workflows/`:
 
 | File | Workflow name | Input |
 |---|---|---|
@@ -214,8 +214,9 @@ The project has four workflows in `.github/workflows/`:
 | `update_subscriptions.yml` | Update Subscriptions | None |
 | `repair_channel_ids.yml` | Repair Channel IDs | `apply` (checkbox) |
 | `add_channel.yml` | Add Channel | `url` (text) |
+| `tests.yml` | Tests | None |
 
-All four workflows start only with `workflow_dispatch`. No workflow has a `schedule:` trigger.
+The four digest workflows start only with `workflow_dispatch`. No workflow has a `schedule:` trigger. `tests.yml` runs `pytest` on each push to `main` and on each pull request. It has read-only permissions and uses no secrets. The README shows its status badge.
 
 `daily_digest.yml` and `update_subscriptions.yml` open a GitHub issue when they fail. Each issue has a label, and a workflow does not open a second issue while one is open. The issue text gives the likely cause and the steps to fix it. If you change the failure handling in `digest.py` or `get_subscriptions.py`, keep these issue texts correct.
 
@@ -226,6 +227,15 @@ If you change a workflow file, test it. Run it from the **Actions** tab after yo
 ### 7.3 Pull requests
 
 Make sure Ruff and the tests pass before you merge.
+
+### 7.4 Releases
+
+The project uses semantic versioning (`MAJOR.MINOR.PATCH`). The version in `pyproject.toml` must be the same as the release tag. To make a release:
+
+1. Change `version` in `pyproject.toml`.
+2. Run `uv lock`. This writes the new version to `uv.lock`.
+3. Commit the two files and push to `main`. Make sure the **Tests** workflow passes.
+4. Run `gh release create vX.Y.Z --generate-notes`. This makes the tag and the GitHub release. The release notes list the changes since the last release.
 
 ---
 
