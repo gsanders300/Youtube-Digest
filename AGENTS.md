@@ -71,11 +71,56 @@ The project uses pytest. The tests are in the `tests/` folder.
 | `youtube_api.py` | Shared YouTube API code: requests with retry, and channel resolution (handle, then ID, then title search). |
 | `channel_list.py` | The only code that reads and writes `channels.yml`. Merges subscriptions into the list. |
 | `environment.py` | Reads the environment variables. |
-| `channels.yml` | The list of YouTube channels to monitor. |
+| `channels.yml` | A sample list of YouTube channels to monitor. `tests/test_channel_list.py` checks that `save(load())` writes it back unchanged. |
 | `tests/` | The pytest tests. |
 | `.github/workflows/` | The GitHub Actions workflow files. |
 | `pyproject.toml`, `uv.lock` | The dependencies and their pinned versions. |
 | `requirements.txt` | A copy of the dependencies for pip. |
+
+### 2.1 Shared YouTube API code
+
+`youtube_api.py` has the YouTube API code that all scripts share. Put new YouTube API logic in this file, not in a script.
+
+- `execute(request)` is the only way to run a request. It tries again with backoff after a rate limit or a server error. It does not try again after `quotaExceeded`.
+- `YouTubeDigest` gets its clients from its constructor: `YouTubeDigest(youtube=..., genai_client=...)`. The tests give mock clients this way.
+
+### 2.2 Channel list
+
+`channel_list.py` is the only code that reads or writes `channels.yml`. That file is the single source of truth for the monitored channels.
+
+- An entry has one of two shapes: a bare `"@handle"` string, or a dict with `handle`, `title`, `id`, `uploads_playlist_id`, and `digest` (default `True`).
+- `load()` turns both shapes into `Channel` models.
+- `save()` writes handle-only entries back as bare strings. It uses the canonical key order and keeps unknown keys.
+- `merge_subscriptions()` (used by `get_subscriptions.py`) never removes entries. It refreshes the matched entries (matched by `id`, then by handle with case ignored), keeps their `digest` flags, and appends new subscriptions.
+
+### 2.3 Channel resolution
+
+All channel resolution is in `youtube_api.resolve_channel(youtube, handle=, channel_id=, title=)`. It tries the `@handle`, then the channel `id`, then a search by `title`.
+
+- The search runs only when the caller gives a title. It costs 100 quota units. The function accepts the result only if its title is the same as the given title (case ignored).
+- The function probes the uploads playlist of each candidate before it accepts the candidate. A channel can resolve but have an uploads playlist that returns 404.
+
+Each caller uses only the steps that it can afford:
+
+- `add_channel.py` gives only a handle or an ID.
+- `repair_channel_ids.py` gives all three.
+- The digest gives the handle and the ID. It does this when an entry has no `uploads_playlist_id`, and when a stored one returns `playlistNotFound` (`_get_recent_videos_with_fallback`).
+- The digest never writes a recovered ID back to `channels.yml`. `repair_channel_ids.py` does that.
+
+### 2.4 Summaries
+
+The digest makes summaries in batches, not one video at a time.
+
+1. `YouTubeDigest.run` collects all new videos from all channels first.
+2. It calls `summarize_descriptions_batch`. That function puts the videos into groups of `GEMINI_BATCH_SIZE`. For each group, it asks Gemini for one JSON object that maps each video ID to its summary.
+3. If a video is missing from the parsed response, the digest calls `summarize_description` for that one video.
+
+Keep this batch-then-fallback structure. It keeps the number of Gemini calls low, and each video still gets a summary.
+
+### 2.5 Order of the videos in the email
+
+- The digest shuffles the channel sections on each run (`random.shuffle`), so no channel is always first.
+- In each channel section, the videos are always sorted oldest first by `_publish_sort_key`.
 
 ---
 
@@ -171,6 +216,8 @@ The project has four workflows in `.github/workflows/`:
 | `add_channel.yml` | Add Channel | `url` (text) |
 
 All four workflows start only with `workflow_dispatch`. No workflow has a `schedule:` trigger.
+
+`daily_digest.yml` and `update_subscriptions.yml` open a GitHub issue when they fail. Each issue has a label, and a workflow does not open a second issue while one is open. The issue text gives the likely cause and the steps to fix it. If you change the failure handling in `digest.py` or `get_subscriptions.py`, keep these issue texts correct.
 
 If you change a workflow file, test it. Run it from the **Actions** tab after you push.
 
