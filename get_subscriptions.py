@@ -81,10 +81,11 @@ class SubscriptionFetcher:
                 )
                 creds = flow.run_local_server(port=0)
 
-            # Print the credentials JSON so the user can save it to GitHub Secrets
-            print("\n--- SAVE THIS TO GITHUB SECRETS AS 'YOUTUBE_CREDENTIALS' ---")
-            print(creds.to_json())
-            print("-----------------------------------------------------------\n")
+                # Print only after a local login. A refresh keeps the same refresh token,
+                # and printing it in CI would expose it in the Actions log.
+                print("\n--- SAVE THIS TO GITHUB SECRETS AS 'YOUTUBE_CREDENTIALS' ---")
+                print(creds.to_json())
+                print("-----------------------------------------------------------\n")
 
         return creds
 

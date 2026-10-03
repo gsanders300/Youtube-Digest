@@ -133,3 +133,40 @@ class TestCredentialValidation:
                 assert "Failed to refresh credentials" in error_msg
                 assert "refresh token may have expired" in error_msg
                 assert "Run 'python get_subscriptions.py' locally" in error_msg
+
+    def test_refresh_does_not_print_credentials(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Test that a successful refresh never prints the refresh token or client secret."""
+        fetcher = SubscriptionFetcher()
+
+        creds_json = json.dumps(
+            {
+                "refresh_token": "1//test-refresh-token",
+                "client_id": "test-client-id",
+                "client_secret": "test-client-secret",
+                "token": "expired-access-token",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "scopes": ["https://www.googleapis.com/auth/youtube.readonly"],
+            }
+        )
+
+        with (
+            patch("environment.youtube_credentials", return_value=creds_json),
+            patch(
+                "google.oauth2.credentials.Credentials.from_authorized_user_info"
+            ) as mock_creds,
+        ):
+            mock_cred_obj = MagicMock()
+            mock_cred_obj.valid = False
+            mock_cred_obj.expired = True
+            mock_cred_obj.refresh_token = "1//test-refresh-token"
+            mock_cred_obj.to_json.return_value = creds_json
+            mock_creds.return_value = mock_cred_obj
+
+            fetcher.get_credentials()
+
+            mock_cred_obj.refresh.assert_called_once()
+            output = capsys.readouterr().out
+            assert "1//test-refresh-token" not in output
+            assert "test-client-secret" not in output
