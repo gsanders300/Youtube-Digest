@@ -3,6 +3,11 @@ name: Update Subscriptions
 on:
   workflow_dispatch: # Allows manual trigger
 
+# Workflows that commit channels.yml run one at a time so their pushes can't collide.
+concurrency:
+  group: channels-yml
+  cancel-in-progress: false
+
 jobs:
   update:
     runs-on: ubuntu-latest
@@ -47,7 +52,7 @@ jobs:
             
             ### Error Details
             - **Workflow Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-            - **Time:** ${{ github.event.repository.updated_at }}
+            - **Time:** ${new Date().toISOString()}
             - **Branch:** ${{ github.ref_name }}
             
             ### How to Fix

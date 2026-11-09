@@ -148,6 +148,22 @@ class TestRunSubjectLine:
         assert "(no new videos)" in subject
         digest.summarize_descriptions_batch.assert_not_called()
 
+    def test_zero_videos_html_names_the_window_start(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The empty-digest message says the time the window started."""
+        monkeypatch.setenv("DIGEST_SINCE", "2026-11-07T23:00:37Z")
+        digest = _make_digest()
+        digest.get_recent_videos = MagicMock(return_value=[])
+        digest.summarize_descriptions_batch = MagicMock()
+        digest.send_email = MagicMock()
+
+        with patch("builtins.open", mock_open(read_data=CHANNELS_YML)):
+            digest.run()
+
+        html, _subject = digest.send_email.call_args.args
+        assert "No new videos found since November 7, 2026 6:00 PM ET." in html
+
 
 class TestRunSkippedChannelReporting:
     """Tests for surfacing per-channel failures in the digest email itself."""

@@ -27,6 +27,11 @@ def recipient_email() -> str:
     return os.environ.get("RECIPIENT_EMAIL", "")
 
 
+def digest_since() -> str:
+    """Returns the ISO 8601 start time of the last successful digest run, or ""."""
+    return os.environ.get("DIGEST_SINCE", "")
+
+
 def youtube_credentials() -> str | None:
     """Returns the YouTube OAuth credentials JSON string from environment variables."""
     return os.environ.get("YOUTUBE_CREDENTIALS")

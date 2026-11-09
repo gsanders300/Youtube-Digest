@@ -8,12 +8,18 @@ on:
         type: string
         required: true
 
+# Workflows that commit channels.yml run one at a time so their pushes can't collide.
+concurrency:
+  group: channels-yml
+  cancel-in-progress: false
+
 jobs:
   add:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
+      issues: write
 
     steps:
       - name: Checkout repository
@@ -41,3 +47,53 @@ jobs:
           git config --local user.name "github-actions[bot]"
           git add channels.yml
           git diff --quiet && git diff --staged --quiet || (git commit -m "Add channel ${CHANNEL_URL} to channels.yml" && git push)
+
+      - name: Create issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        env:
+          # Read through the environment, not ${{ }}, so the URL can't inject script.
+          CHANNEL_URL: ${{ inputs.url }}
+        with:
+          script: |
+            const issue_title = '⚠️ Add Channel Failed';
+            const issue_body = `## Add Channel Workflow Failed
+
+            The **Add Channel** workflow could not add a channel to \`channels.yml\`.
+
+            ### Error Details
+            - **Workflow Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            - **Time:** ${new Date().toISOString()}
+            - **Channel URL:** \`${process.env.CHANNEL_URL}\`
+
+            ### Possible Causes
+            - The URL is not a channel URL, @handle, or UC... channel ID
+            - No channel matches the URL
+            - Missing or invalid \`YOUTUBE_API_KEY\`, or API quota exceeded
+            - The push was rejected because \`channels.yml\` changed during the run
+
+            ### Next Steps
+            - Review the error message in the workflow logs
+            - Fix the cause, then run **Add Channel** again
+            - Close this issue once resolved
+
+            ---
+            *This issue was automatically created by the Add Channel workflow.*`;
+
+            // Check if an issue already exists
+            const issues = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: ['add-channel-error']
+            });
+
+            if (issues.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issue_title,
+                body: issue_body,
+                labels: ['add-channel-error', 'automated']
+              });
+            }

@@ -8,6 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
+      actions: read # to find the last successful digest run
       contents: read
       issues: write
 
@@ -23,9 +24,23 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen --no-dev
 
+      # The digest covers videos published since the last successful run started,
+      # so a late, failed, or skipped run neither drops nor repeats videos.
+      # Empty on the first run, which falls back to the last 24 hours.
+      - name: Find the last successful digest run
+        id: since
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          since=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow daily_digest.yml \
+            --status success --limit 1 --json startedAt --jq '.[0].startedAt // ""')
+          echo "Last successful run started: ${since:-none}"
+          echo "since=$since" >> "$GITHUB_OUTPUT"
+
       - name: Run digest script
         id: digest
         env:
+          DIGEST_SINCE: ${{ steps.since.outputs.since }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
@@ -34,7 +49,7 @@ jobs:
         run: uv run --frozen --no-dev python digest.py
 
       - name: Create issue on failure
-        if: failure() && steps.digest.outcome == 'failure'
+        if: failure() && (steps.since.outcome == 'failure' || steps.digest.outcome == 'failure')
         uses: actions/github-script@v7
         with:
           script: |
@@ -45,7 +60,7 @@ jobs:
             
             ### Error Details
             - **Workflow Run:** [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
-            - **Time:** ${{ github.event.repository.updated_at }}
+            - **Time:** ${new Date().toISOString()}
             - **Branch:** ${{ github.ref_name }}
             
             ### Possible Causes

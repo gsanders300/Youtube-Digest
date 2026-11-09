@@ -18,9 +18,6 @@ The file `pyproject.toml` lists the dependencies. The file `uv.lock` pins the ve
 | Install the same set as GitHub Actions | `uv sync --frozen --no-dev` |
 | Add a dependency | `uv add package-name` |
 | Add a test-only dependency | `uv add --dev package-name` |
-| Install with pip (local only) | `pip install -r requirements.txt` |
-
-When you add a dependency, also add it to `requirements.txt`. That file is a copy for people who use pip.
 
 ### 1.2 Run the scripts
 
@@ -75,7 +72,6 @@ The project uses pytest. The tests are in the `tests/` folder.
 | `tests/` | The pytest tests. |
 | `.github/workflows/` | The GitHub Actions workflow files. |
 | `pyproject.toml`, `uv.lock` | The dependencies and their pinned versions. |
-| `requirements.txt` | A copy of the dependencies for pip. |
 
 ### 2.1 Shared YouTube API code
 
@@ -185,6 +181,7 @@ Every module, class, and function must have a docstring. Use triple double quote
   - `GMAIL_APP_PASSWORD`
   - `RECIPIENT_EMAIL`
   - `YOUTUBE_CREDENTIALS` (only for `get_subscriptions.py` in GitHub Actions)
+- `DIGEST_SINCE` is not a secret. It is the ISO 8601 start time of the last successful digest run. `daily_digest.yml` sets it. When it is empty, the digest uses the last `LOOKBACK_HOURS` hours.
 - Settings that are not secret, for example the channel list, go in `channels.yml`.
 
 ---
@@ -218,7 +215,7 @@ The project has five workflows in `.github/workflows/`:
 
 The four digest workflows start only with `workflow_dispatch`. No workflow has a `schedule:` trigger. `tests.yml` runs `pytest` on each push to `main` and on each pull request. It has read-only permissions and uses no secrets. The README shows its status badge.
 
-`daily_digest.yml` and `update_subscriptions.yml` open a GitHub issue when they fail. Each issue has a label, and a workflow does not open a second issue while one is open. The issue text gives the likely cause and the steps to fix it. If you change the failure handling in `digest.py` or `get_subscriptions.py`, keep these issue texts correct.
+All four digest workflows open a GitHub issue when they fail. Each issue has a label, and a workflow does not open a second issue while one is open. The issue text gives the likely cause and the steps to fix it. If you change the failure handling in `digest.py` or `get_subscriptions.py`, keep these issue texts correct.
 
 If you change a workflow file, test it. Run it from the **Actions** tab after you push.
 
@@ -273,8 +270,7 @@ The `digest.py` script makes HTML for email clients. Email clients have limits. 
 - `pyproject.toml` is the source of truth. `uv.lock` pins the versions. GitHub Actions installs from the lock file with `uv sync --frozen`.
 - To add a library:
   1. Run `uv add package-name`. This updates `pyproject.toml` and `uv.lock`.
-  2. Add the same library to `requirements.txt`.
-  3. If the library needs special setup, describe the setup in `README.md` or in this file.
+  2. If the library needs special setup, describe the setup in `README.md` or in this file.
 - Do not add a heavy library if a small one does the job. Use the Python standard library for simple tasks, for example `smtplib` and `json`.
 
 ---

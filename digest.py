@@ -30,8 +30,34 @@ GEMINI_BATCH_MAX_OUTPUT_TOKENS = 4096
 GEMINI_BATCH_SIZE = 12  # Videos summarized per batched Gemini call.
 DESCRIPTION_CHAR_LIMIT = 6000  # Max description chars sent to Gemini per video.
 
-# How far back to look for "new" videos.
+# How far back to look for "new" videos when DIGEST_SINCE is not set.
 LOOKBACK_HOURS = 24
+
+
+def lookback_cutoff(now: datetime.datetime) -> datetime.datetime:
+    """Returns the earliest publish time that counts as a new video.
+
+    Uses DIGEST_SINCE (the start of the last successful digest run) when it is
+    set, so a late, failed, or skipped run neither drops nor repeats videos.
+    Otherwise falls back to LOOKBACK_HOURS before now.
+
+    Args:
+        now: The current time, timezone-aware.
+
+    Returns:
+        A timezone-aware cutoff in now's timezone.
+
+    Raises:
+        ValueError: If DIGEST_SINCE is set but is not an ISO 8601 date-time with
+            a timezone.
+    """
+    since = environment.digest_since()
+    if not since:
+        return now - datetime.timedelta(hours=LOOKBACK_HOURS)
+    cutoff = isodate.parse_datetime(since)
+    if cutoff.tzinfo is None:
+        raise ValueError(f"DIGEST_SINCE has no timezone: {since!r}")
+    return cutoff.astimezone(now.tzinfo)
 
 
 class VideoDetail(BaseModel):
@@ -82,13 +108,15 @@ class YouTubeDigest:
         self.genai_client = genai_client or genai.Client(
             api_key=environment.gemini_api_key()
         )
+        # Fixed once per run so every channel uses the same window.
+        self.cutoff = lookback_cutoff(
+            datetime.datetime.now(ZoneInfo("America/New_York"))
+        )
 
     def get_recent_videos(self, playlist_id: str) -> list[dict[str, Any]]:
-        """Fetches videos published within the lookback window from a playlist."""
+        """Fetches videos published at or after self.cutoff from a playlist."""
         tz_eastern = ZoneInfo("America/New_York")
-        cutoff = datetime.datetime.now(tz_eastern) - datetime.timedelta(
-            hours=LOOKBACK_HOURS
-        )
+        cutoff = self.cutoff
         request = self.youtube.playlistItems().list(
             part="snippet,contentDetails",
             playlistId=playlist_id,
@@ -645,7 +673,8 @@ class YouTubeDigest:
             html += "</ul></div>"
 
         if total_videos == 0:
-            html += f"<p>No new videos found in the last {LOOKBACK_HOURS} hours.</p>"
+            since_str = self.cutoff.strftime("%B %-d, %Y %-I:%M %p ET")
+            html += f"<p>No new videos found since {since_str}.</p>"
         else:
             # Randomize channel order on every run so no single channel always
             # leads the digest. Empty channels are already absent from

@@ -90,8 +90,6 @@ Do these steps:
 
 **NOTE:** `uv sync` also installs the test tools. To install only what GitHub Actions installs, run `uv sync --frozen --no-dev`.
 
-**NOTE:** If you do not use uv, run `pip install -r requirements.txt`. GitHub Actions does not use this method.
-
 ### 2.1 Store your keys in a `.env` file
 
 The scripts read their keys from environment variables. You can store the keys in a file with the name `.env` in the root folder. Git ignores this file. uv loads the file when you give the `--env-file .env` option.
@@ -222,7 +220,7 @@ The digest needs these environment variables: `YOUTUBE_API_KEY`, `GEMINI_API_KEY
    uv run --env-file .env python digest.py
    ```
 
-The tool sends one email. The email lists the videos published in the last 24 hours.
+The tool sends one email. The email lists the videos published in the last 24 hours. To use a different start time, set `DIGEST_SINCE` to an ISO 8601 date-time with a time zone, for example `2026-11-08T23:00:37Z`. In GitHub Actions, the workflow sets `DIGEST_SINCE` to the start time of the last successful digest run. A late, failed, or skipped run then does not lose videos or send them twice.
 
 ### 4.2 Check and repair the channel IDs
 
@@ -279,7 +277,7 @@ To run a workflow:
 4. If the workflow has an input, write or select the value.
 5. Select the green **Run workflow** button.
 
-**NOTE:** If the daily digest fails, the workflow opens a GitHub issue in your repository. The issue has the label `digest-error`. If Update Subscriptions fails, the workflow opens an issue with the label `credentials-error`. The issue tells you how to make new credentials. A workflow does not open a second issue while the first one is open.
+**NOTE:** If the daily digest fails, the workflow opens a GitHub issue in your repository. The issue has the label `digest-error`. If Update Subscriptions fails, the workflow opens an issue with the label `credentials-error`. The issue tells you how to make new credentials. If Add Channel or Repair Channel IDs fails, the workflow opens an issue with the label `add-channel-error` or `repair-error`. A workflow does not open a second issue while the first one is open.
 
 ### 5.1 Make the digest run each day
 
