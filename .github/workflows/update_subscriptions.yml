@@ -31,6 +31,7 @@ jobs:
         id: fetch
         env:
           YOUTUBE_CREDENTIALS: ${{ secrets.YOUTUBE_CREDENTIALS }}
+          PYTHONUNBUFFERED: "1"
         run: uv run --frozen --no-dev python get_subscriptions.py
 
       - name: Commit and push if changed

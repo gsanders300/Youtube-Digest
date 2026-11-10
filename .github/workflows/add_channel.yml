@@ -37,6 +37,7 @@ jobs:
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           CHANNEL_URL: ${{ inputs.url }}
+          PYTHONUNBUFFERED: "1"
         run: uv run --frozen --no-dev python add_channel.py "$CHANNEL_URL"
 
       - name: Commit and push if changed

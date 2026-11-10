@@ -46,6 +46,7 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+          PYTHONUNBUFFERED: "1"
         run: uv run --frozen --no-dev python digest.py
 
       - name: Create issue on failure

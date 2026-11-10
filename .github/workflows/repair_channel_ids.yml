@@ -38,6 +38,7 @@ jobs:
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
           APPLY: ${{ inputs.apply }}
+          PYTHONUNBUFFERED: "1"
         run: |
           if [ "$APPLY" = "true" ]; then
             uv run --frozen --no-dev python repair_channel_ids.py --write
