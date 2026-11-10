@@ -355,7 +355,7 @@ Run these commands from the root folder of the project.
 
 This section is for reference. You do not need to read it to use the tool.
 
-- **Summaries.** The tool uses the `gemini-3.8-flash` model. If Gemini returns an API error for that model, the tool tries the same request on `gemini-3.5-flash-lite`. It sends several videos to Gemini in one request. If Gemini does not return a summary for a video, the tool asks again for that one video. Each video gets a summary.
+- **Summaries.** The tool uses the `gemini-3.8-flash` model. If Gemini returns an API error for that model, or doesn't answer within 60 seconds, the tool tries the same request on `gemini-3.5-flash-lite`. It sends several videos to Gemini in one request. If Gemini does not return a summary for a video, the tool asks again for that one video. Each video gets a summary.
 - **Channels that the tool cannot check.** If a channel has a bad handle, no uploads playlist, or an API error, the tool continues with the other channels. The email shows a note with the names of the channels that it could not check.
 - **Duplicate entries.** If two entries have the same uploads playlist, the tool uses only the first entry.
 - **Wrong playlist IDs.** If a stored uploads playlist ID is wrong, the API returns `playlistNotFound`. The tool then finds the channel again from its `@handle`, then from its stored channel ID. It makes sure that the new playlist works, and then it continues. The tool does not write the correction to `channels.yml`. To correct the file, run the repair tool (see section 4.2).

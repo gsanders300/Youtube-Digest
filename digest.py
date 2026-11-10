@@ -10,6 +10,7 @@ from html import escape
 from typing import Any
 
 import googleapiclient.discovery
+import httpx2
 import isodate
 from zoneinfo import ZoneInfo
 from google import genai
@@ -24,8 +25,11 @@ from youtube_api import execute, is_playlist_not_found, resolve_channel
 # Centralized here so tuning affects both the batched and single-video
 # summarization paths consistently.
 GEMINI_MODEL = "gemini-3.8-flash"
-# Used when GEMINI_MODEL returns an API error.
+# Used when GEMINI_MODEL returns an API error or times out.
 GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"
+# Per-request limit, so an overloaded model that never answers fails over
+# instead of stalling the run.
+GEMINI_TIMEOUT_SECONDS = 60
 GEMINI_TEMPERATURE = 0.7
 GEMINI_MAX_OUTPUT_TOKENS = 1024
 GEMINI_BATCH_MAX_OUTPUT_TOKENS = 4096
@@ -108,7 +112,8 @@ class YouTubeDigest:
             "youtube", "v3", developerKey=environment.youtube_api_key()
         )
         self.genai_client = genai_client or genai.Client(
-            api_key=environment.gemini_api_key()
+            api_key=environment.gemini_api_key(),
+            http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_SECONDS * 1000),
         )
         # Fixed once per run so every channel uses the same window.
         self.cutoff = lookback_cutoff(
@@ -228,7 +233,7 @@ class YouTubeDigest:
     def _generate_content(
         self, prompt: str, config: types.GenerateContentConfig
     ) -> types.GenerateContentResponse:
-        """Calls GEMINI_MODEL, then GEMINI_FALLBACK_MODEL if the first call fails.
+        """Calls GEMINI_MODEL, then GEMINI_FALLBACK_MODEL on an API error or timeout.
 
         Args:
             prompt: The prompt text to send.
@@ -238,17 +243,20 @@ class YouTubeDigest:
             The response from whichever model answered first.
 
         Raises:
-            errors.APIError: If both models return an API error.
+            errors.APIError: If the fallback model returns an API error.
+            httpx2.TimeoutException: If the fallback model times out.
         """
         try:
             return self.genai_client.models.generate_content(
                 model=GEMINI_MODEL, contents=prompt, config=config
             )
-        except errors.APIError as e:
-            print(f"  {GEMINI_MODEL} failed ({e}); trying {GEMINI_FALLBACK_MODEL}...")
-            return self.genai_client.models.generate_content(
+        except (errors.APIError, httpx2.TimeoutException) as e:
+            print(f"  {GEMINI_MODEL} failed ({e!r}); trying {GEMINI_FALLBACK_MODEL}...")
+            response = self.genai_client.models.generate_content(
                 model=GEMINI_FALLBACK_MODEL, contents=prompt, config=config
             )
+            print(f"  {GEMINI_FALLBACK_MODEL} answered.")
+            return response
 
     def summarize_description(self, text_to_summarize: str) -> str:
         """Generates a 2-3 sentence summary of the video content using Gemini.

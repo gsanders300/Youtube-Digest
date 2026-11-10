@@ -6,12 +6,20 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import httpx2
 from google.genai import errors, types
 
-from digest import GEMINI_FALLBACK_MODEL, GEMINI_MODEL, YouTubeDigest
+from digest import (
+    GEMINI_FALLBACK_MODEL,
+    GEMINI_MODEL,
+    GEMINI_TIMEOUT_SECONDS,
+    YouTubeDigest,
+)
 
 
 def _make_digest() -> YouTubeDigest:
@@ -211,7 +219,9 @@ class TestModelFallback:
         calls = digest.genai_client.models.generate_content.call_args_list
         assert [c.kwargs["model"] for c in calls] == [GEMINI_MODEL]
 
-    def test_api_error_falls_back_to_fallback_model(self) -> None:
+    def test_api_error_falls_back_to_fallback_model(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         """An API error from the primary model should retry on the fallback model."""
         digest = _make_digest()
         digest.genai_client.models.generate_content.side_effect = [
@@ -227,6 +237,37 @@ class TestModelFallback:
             GEMINI_MODEL,
             GEMINI_FALLBACK_MODEL,
         ]
+        assert f"{GEMINI_FALLBACK_MODEL} answered." in capsys.readouterr().out
+
+    def test_timeout_falls_back_to_fallback_model(self) -> None:
+        """A primary model that times out should retry on the fallback model."""
+        digest = _make_digest()
+        digest.genai_client.models.generate_content.side_effect = [
+            httpx2.ReadTimeout("timed out"),
+            _make_response("Fallback summary."),
+        ]
+
+        with patch("time.sleep"):
+            assert digest.summarize_description("Title: x") == "Fallback summary."
+
+        calls = digest.genai_client.models.generate_content.call_args_list
+        assert [c.kwargs["model"] for c in calls] == [
+            GEMINI_MODEL,
+            GEMINI_FALLBACK_MODEL,
+        ]
+
+    def test_client_has_request_timeout(self) -> None:
+        """The default Gemini client should be built with GEMINI_TIMEOUT_SECONDS."""
+        with (
+            patch("digest.googleapiclient.discovery.build"),
+            patch("digest.environment.youtube_api_key", return_value="k"),
+            patch("digest.environment.gemini_api_key", return_value="k"),
+            patch("digest.genai.Client") as client,
+        ):
+            YouTubeDigest()
+
+        http_options = client.call_args.kwargs["http_options"]
+        assert http_options.timeout == GEMINI_TIMEOUT_SECONDS * 1000
 
     def test_batch_uses_fallback_model(self) -> None:
         """The batch path should also fall back on an API error."""
