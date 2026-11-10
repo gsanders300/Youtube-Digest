@@ -279,7 +279,8 @@ The `digest.py` script makes HTML for email clients. Email clients have limits. 
 
 - Before you add a feature, check if `pyproject.toml` and `uv.lock` need a change.
 - If you change `digest.py`, make sure the HTML is still valid for email clients (see section 9).
-- The Gemini prompts are written for the `gemini-3.1-flash-lite` model. Keep them short and clear.
+- The Gemini prompts are written for the `gemini-3.8-flash` model (`GEMINI_MODEL`). Keep them short and clear.
+- Every Gemini call goes through `YouTubeDigest._generate_content`. It tries `GEMINI_MODEL` and, on a `google.genai.errors.APIError`, tries `GEMINI_FALLBACK_MODEL` (`gemini-3.5-flash-lite`) once with the same prompt and config.
 - Run `uvx ruff format .` and `uvx ruff check .` before you finish a change.
 - If you make a new file, give it a `snake_case` name, a module docstring, and type hints.
 - Do not remove the `if __name__ == "__main__":` block from a script.

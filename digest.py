@@ -13,7 +13,7 @@ import googleapiclient.discovery
 import isodate
 from zoneinfo import ZoneInfo
 from google import genai
-from google.genai import types
+from google.genai import errors, types
 from pydantic import BaseModel
 
 import channel_list
@@ -23,7 +23,9 @@ from youtube_api import execute, is_playlist_not_found, resolve_channel
 # --- Gemini generation tuning -----------------------------------------------
 # Centralized here so tuning affects both the batched and single-video
 # summarization paths consistently.
-GEMINI_MODEL = "gemini-3.1-flash-lite"
+GEMINI_MODEL = "gemini-3.8-flash"
+# Used when GEMINI_MODEL returns an API error.
+GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"
 GEMINI_TEMPERATURE = 0.7
 GEMINI_MAX_OUTPUT_TOKENS = 1024
 GEMINI_BATCH_MAX_OUTPUT_TOKENS = 4096
@@ -223,12 +225,35 @@ class YouTubeDigest:
             )
         return details
 
+    def _generate_content(
+        self, prompt: str, config: types.GenerateContentConfig
+    ) -> types.GenerateContentResponse:
+        """Calls GEMINI_MODEL, then GEMINI_FALLBACK_MODEL if the first call fails.
+
+        Args:
+            prompt: The prompt text to send.
+            config: The generation config to use for both models.
+
+        Returns:
+            The response from whichever model answered first.
+
+        Raises:
+            errors.APIError: If both models return an API error.
+        """
+        try:
+            return self.genai_client.models.generate_content(
+                model=GEMINI_MODEL, contents=prompt, config=config
+            )
+        except errors.APIError as e:
+            print(f"  {GEMINI_MODEL} failed ({e}); trying {GEMINI_FALLBACK_MODEL}...")
+            return self.genai_client.models.generate_content(
+                model=GEMINI_FALLBACK_MODEL, contents=prompt, config=config
+            )
+
     def summarize_description(self, text_to_summarize: str) -> str:
         """Generates a 2-3 sentence summary of the video content using Gemini.
 
-        Disables Gemini's "thinking" mode so the full max_output_tokens budget
-        is spent on the visible summary rather than internal reasoning tokens,
-        and repairs any response that is still cut off mid-sentence by retrying
+        Repairs any response that is still cut off mid-sentence by retrying
         once with a larger budget and, failing that, trimming back to the last
         complete sentence.
 
@@ -254,17 +279,12 @@ class YouTubeDigest:
         gen_config = types.GenerateContentConfig(
             max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
             temperature=GEMINI_TEMPERATURE,
-            thinking_config=types.ThinkingConfig(thinking_level="minimal"),
         )
 
         try:
             # We move the system instruction into the prompt or the config if supported by this SDK version
             # Using a slightly safer approach for the prompt structure
-            response = self.genai_client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config=gen_config,
-            )
+            response = self._generate_content(prompt, gen_config)
 
             if not response or not response.text:
                 print("Empty response from Gemini")
@@ -278,13 +298,8 @@ class YouTubeDigest:
                 retry_config = types.GenerateContentConfig(
                     max_output_tokens=gen_config.max_output_tokens * 2,
                     temperature=gen_config.temperature,
-                    thinking_config=gen_config.thinking_config,
                 )
-                retry_response = self.genai_client.models.generate_content(
-                    model=GEMINI_MODEL,
-                    contents=prompt,
-                    config=retry_config,
-                )
+                retry_response = self._generate_content(prompt, retry_config)
                 if retry_response and retry_response.text:
                     response = retry_response
 
@@ -306,11 +321,7 @@ class YouTubeDigest:
             try:
                 print("Retrying with 5s delay...")
                 time.sleep(5)
-                response = self.genai_client.models.generate_content(
-                    model=GEMINI_MODEL,
-                    contents=prompt,
-                    config=gen_config,
-                )
+                response = self._generate_content(prompt, gen_config)
                 return (
                     response.text.strip()
                     if response and response.text
@@ -432,17 +443,12 @@ class YouTubeDigest:
         gen_config = types.GenerateContentConfig(
             max_output_tokens=GEMINI_BATCH_MAX_OUTPUT_TOKENS,
             temperature=GEMINI_TEMPERATURE,
-            thinking_config=types.ThinkingConfig(thinking_level="minimal"),
             response_mime_type="application/json",
         )
 
         response = None
         try:
-            response = self.genai_client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=prompt,
-                config=gen_config,
-            )
+            response = self._generate_content(prompt, gen_config)
 
             if not response or not response.text:
                 print("Empty response from Gemini for batch summary.")

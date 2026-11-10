@@ -9,9 +9,9 @@ from unittest.mock import MagicMock, patch
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from google.genai import types
+from google.genai import errors, types
 
-from digest import YouTubeDigest
+from digest import GEMINI_FALLBACK_MODEL, GEMINI_MODEL, YouTubeDigest
 
 
 def _make_digest() -> YouTubeDigest:
@@ -87,7 +87,7 @@ class TestSummarizeDescriptionTruncationRetry:
         assert digest.genai_client.models.generate_content.call_count == 2
 
         # The retry call should have used a larger max_output_tokens than the
-        # initial call, and should have kept thinking disabled.
+        # initial call.
         first_call_config = digest.genai_client.models.generate_content.call_args_list[
             0
         ].kwargs["config"]
@@ -95,12 +95,6 @@ class TestSummarizeDescriptionTruncationRetry:
             1
         ].kwargs["config"]
         assert retry_call_config.max_output_tokens > first_call_config.max_output_tokens
-        # The retry should preserve the initial call's minimal-thinking setting.
-        assert retry_call_config.thinking_config == first_call_config.thinking_config
-        assert (
-            retry_call_config.thinking_config.thinking_level
-            == first_call_config.thinking_config.thinking_level
-        )
 
     def test_still_truncated_after_retry_is_trimmed_to_last_sentence(self) -> None:
         """If the retry is also truncated, the result must be trimmed back to
@@ -192,3 +186,73 @@ class TestTrimToLastCompleteSentence:
     def test_returns_original_when_no_terminator_found(self) -> None:
         text = "No terminal punctuation at all"
         assert YouTubeDigest._trim_to_last_complete_sentence(text) == text
+
+
+def _api_error() -> errors.ClientError:
+    """Builds a Gemini API error like the one returned for an unknown model."""
+    return errors.ClientError(
+        404, {"error": {"code": 404, "message": "not found", "status": "NOT_FOUND"}}
+    )
+
+
+class TestModelFallback:
+    """Tests for falling back from GEMINI_MODEL to GEMINI_FALLBACK_MODEL."""
+
+    def test_primary_success_uses_only_primary(self) -> None:
+        """A working primary model should be the only model called."""
+        digest = _make_digest()
+        digest.genai_client.models.generate_content.return_value = _make_response(
+            "A summary."
+        )
+
+        with patch("time.sleep"):
+            assert digest.summarize_description("Title: x") == "A summary."
+
+        calls = digest.genai_client.models.generate_content.call_args_list
+        assert [c.kwargs["model"] for c in calls] == [GEMINI_MODEL]
+
+    def test_api_error_falls_back_to_fallback_model(self) -> None:
+        """An API error from the primary model should retry on the fallback model."""
+        digest = _make_digest()
+        digest.genai_client.models.generate_content.side_effect = [
+            _api_error(),
+            _make_response("Fallback summary."),
+        ]
+
+        with patch("time.sleep"):
+            assert digest.summarize_description("Title: x") == "Fallback summary."
+
+        calls = digest.genai_client.models.generate_content.call_args_list
+        assert [c.kwargs["model"] for c in calls] == [
+            GEMINI_MODEL,
+            GEMINI_FALLBACK_MODEL,
+        ]
+
+    def test_batch_uses_fallback_model(self) -> None:
+        """The batch path should also fall back on an API error."""
+        digest = _make_digest()
+        digest.genai_client.models.generate_content.side_effect = [
+            _api_error(),
+            _make_response('{"v1": "Batch summary."}'),
+        ]
+        batch = {"v1": MagicMock(title="T", description="D")}
+
+        with patch("time.sleep"):
+            assert digest._summarize_batch_via_gemini(batch) == {"v1": "Batch summary."}
+
+        calls = digest.genai_client.models.generate_content.call_args_list
+        assert [c.kwargs["model"] for c in calls] == [
+            GEMINI_MODEL,
+            GEMINI_FALLBACK_MODEL,
+        ]
+
+    def test_non_api_error_does_not_use_fallback(self) -> None:
+        """A non-API error (e.g. a network failure) should not try the fallback model."""
+        digest = _make_digest()
+        digest.genai_client.models.generate_content.side_effect = Exception("boom")
+
+        with patch("time.sleep"):
+            assert digest.summarize_description("Title: x") == "Summary unavailable."
+
+        calls = digest.genai_client.models.generate_content.call_args_list
+        assert GEMINI_FALLBACK_MODEL not in [c.kwargs["model"] for c in calls]
