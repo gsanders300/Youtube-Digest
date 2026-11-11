@@ -1,4 +1,4 @@
-# YTNotifier
+# Youtube-Digest
 
 [![Tests](https://github.com/gsanders300/Youtube-Digest/actions/workflows/tests.yml/badge.svg)](https://github.com/gsanders300/Youtube-Digest/actions/workflows/tests.yml)
 [![Latest release](https://img.shields.io/github/v/release/gsanders300/Youtube-Digest)](https://github.com/gsanders300/Youtube-Digest/releases/latest)
@@ -6,7 +6,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 
-YTNotifier is a Python tool. It runs in GitHub Actions. Each day, it sends one email to you. The email lists the new videos from the YouTube channels that you select. Gemini AI writes a short summary of each video.
+Youtube-Digest is a Python tool. It runs in GitHub Actions. Each day, it sends one email to you. The email lists the new videos from the YouTube channels that you select. Gemini AI writes a short summary of each video.
 
 This document tells you how to install the tool, how to configure it, and how to run each command.
 
@@ -19,7 +19,7 @@ The tool reads its keys and passwords from GitHub Secrets. To store a secret, go
 ### 1.1 Google Cloud (YouTube Data API)
 
 1. Go to the [Google Cloud Console](https://console.cloud.google.com/).
-2. Make a new project. For example, give it the name `YTNotifier`.
+2. Make a new project. For example, give it the name `Youtube-Digest`.
 3. Go to **APIs & Services > Library**.
 4. Find "YouTube Data API v3". Select **Enable**.
 5. Go to **APIs & Services > Credentials**.
@@ -47,7 +47,7 @@ The tool sends the email through your Gmail account. Gmail needs an app password
 
 1. Go to your [Google Account security settings](https://myaccount.google.com/security).
 2. Turn on **2-Step Verification**.
-3. Find **App passwords**. Make a new app password with the name `YTNotifier`.
+3. Find **App passwords**. Make a new app password with the name `Youtube-Digest`.
 4. Store your Gmail address in GitHub Secrets with the name `GMAIL_USER`.
 5. Store the 16-character app password in GitHub Secrets with the name `GMAIL_APP_PASSWORD`.
 

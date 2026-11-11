@@ -1,6 +1,6 @@
-# Agent Guidelines: YTNotifier
+# Agent Guidelines: Youtube-Digest
 
-This document gives the rules for AI agents that work on the YTNotifier repository. Obey these rules. They keep the code consistent and easy to maintain.
+This document gives the rules for AI agents that work on the Youtube-Digest repository. Obey these rules. They keep the code consistent and easy to maintain.
 
 ---
 
