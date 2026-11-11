@@ -260,7 +260,9 @@ See section 3.1.
 
 ## 5. Run the workflows in GitHub Actions
 
-The project has four workflows for the digest. Each of these workflows starts only when you start it by hand. No workflow has a schedule. A fifth workflow, **Tests**, runs the tests automatically on each push to `main` and on each pull request. It needs no secrets.
+The project has four workflows for the digest. Each of these workflows starts only when you start it by hand. A fifth workflow, **Tests**, runs the tests automatically on each push to `main` and on each pull request. It needs no secrets.
+
+Dependabot keeps the dependencies up to date. Every Saturday at 3am ET, it opens one pull request for the Python packages and one for the GitHub Actions. When the tests pass, the **Dependabot auto-merge** workflow merges the pull request, and the merge makes a new release. This automation needs a fine-grained personal access token for this repository, with read and write access to Contents, Pull requests, and Workflows, saved as the Dependabot secret `DEPENDABOT_AUTOMERGE_TOKEN`. It also needs **Allow auto-merge** in the repository settings and a ruleset on `main` that requires the `test` check. The **Dependabot watch** workflow opens an issue when a Dependabot pull request stays open for more than one day.
 
 | Workflow name | What it does | Input | Secrets that it needs |
 |---|---|---|---|

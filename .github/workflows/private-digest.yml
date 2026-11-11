@@ -47,7 +47,7 @@ jobs:
     steps:
       # In a called workflow this is the caller's repository.
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Find Youtube-Digest release
         id: release
@@ -61,14 +61,14 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Checkout Youtube-Digest code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: gsanders300/Youtube-Digest
           ref: ${{ steps.release.outputs.tag }}
           path: app
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
         with:
           enable-cache: true
 
@@ -142,7 +142,7 @@ jobs:
       # The subscriptions issue is about credentials, so only its script's failure opens it.
       - name: Create issue on failure
         if: failure() && (inputs.task != 'subscriptions' || steps.task.outcome == 'failure')
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
         env:
           # Read through the environment, not ${{ }}, so the inputs can't inject script.
           TASK: ${{ inputs.task }}

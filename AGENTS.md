@@ -213,10 +213,17 @@ The project has these workflows in `.github/workflows/`:
 | `add_channel.yml` | Add Channel | `url` (text) |
 | `tests.yml` | Tests | None |
 | `private-digest.yml` | Private digest | `task`, `url`, `apply`, `ref` (`workflow_call`) |
+| `release.yml` | Release | None (runs on each push) |
+| `dependabot-auto-merge.yml` | Dependabot auto-merge | None (runs on Dependabot pull requests) |
+| `dependabot-watch.yml` | Dependabot watch | None (daily `schedule:`) |
 
 `private-digest.yml` is the reusable workflow that the owner's private repository calls for all four digest workflows (README section 5.2). It runs the latest release, never `main`, and runs the tests first. The private repository calls it from `main`, so a change to it goes live at the next run with no release and no tests: keep its inputs and secret names stable, and keep its issue texts in step with the four digest workflows here.
 
-The four digest workflows start only with `workflow_dispatch`. No workflow has a `schedule:` trigger. `tests.yml` runs `pytest` on each push to `main` and on each pull request. It has read-only permissions and uses no secrets. The README shows its status badge.
+The four digest workflows start only with `workflow_dispatch`. Do not give them a `schedule:` trigger. The only scheduled workflow is `dependabot-watch.yml`. `tests.yml` runs `pytest` with `--locked` on each push to `main` and on each pull request, so a stale `uv.lock` fails it. It has read-only permissions and uses no secrets. The README shows its status badge. `release.yml` makes a release on each push to `main` without waiting for Tests, so a stale lock pushed directly to `main` is still released. The private workflow runs the tests before it runs a script.
+
+Every `uses:` is pinned to a commit SHA with a version comment. Keep new ones pinned.
+
+Dependency updates are automatic. `.github/dependabot.yml` opens grouped pull requests for the Python packages and for the GitHub Actions every Saturday at 3am ET, and ignores major versions. The `uv` entry has `allow: dependency-type: all`, so Dependabot checks every package in `uv.lock`, not only the direct dependencies. `dependabot-auto-merge.yml` turns on auto-merge with the `DEPENDABOT_AUTOMERGE_TOKEN` Dependabot secret, a fine-grained token. A merge made with `GITHUB_TOKEN` would not start `release.yml`. A ruleset on `main` requires the `test` check, so the merge waits for Tests. The merge is a push, so `release.yml` makes the next patch release, and the private digest runs it at its next run. The auto-merge job sets the commit message itself, because `release.yml` reads `#minor` and `#major` from it. That job holds a write token, so it must never check out or run the pull request's code. `dependabot-watch.yml` opens an issue labeled `dependabot-stuck` when a Dependabot pull request stays open for more than one day. Dependabot security updates are not limited by the major-version rule.
 
 All four digest workflows open a GitHub issue when they fail. Each issue has a label, and a workflow does not open a second issue while one is open. The issue text gives the likely cause and the steps to fix it. If you change the failure handling in `digest.py` or `get_subscriptions.py`, keep these issue texts correct.
 
