@@ -2,6 +2,7 @@ version: 2
 
 # Weekly grouped updates. dependabot-auto-merge.yml merges them once the test check
 # passes, and each merge becomes a patch release. Major versions stay a manual decision.
+# Pushing a change to this file starts a Dependabot run right away.
 updates:
   - package-ecosystem: uv
     directory: /
