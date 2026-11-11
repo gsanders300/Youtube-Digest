@@ -10,7 +10,7 @@ The project uses Python 3.12 or later. It uses uv to manage packages.
 
 ### 1.1 Dependencies
 
-The file `pyproject.toml` lists the dependencies. The file `uv.lock` pins the versions. GitHub Actions installs from the lock file with `uv sync --frozen`.
+The file `pyproject.toml` lists the dependencies. The file `uv.lock` pins the versions. The digest workflows install from the lock file with `uv sync --frozen`. The **Tests** workflow uses `--locked`, which also fails when `uv.lock` does not agree with `pyproject.toml`. Dependabot updates both files every week (section 7.2).
 
 | Task | Command |
 |---|---|
@@ -237,12 +237,11 @@ Make sure Ruff and the tests pass before you merge.
 
 ### 7.4 Releases
 
-The project uses semantic versioning (`MAJOR.MINOR.PATCH`). The version in `pyproject.toml` must be the same as the release tag. To make a release:
+The project uses semantic versioning (`MAJOR.MINOR.PATCH`). `release.yml` makes a release on each push to `main`. It reads the latest `vX.Y.Z` tag and adds 1 to the patch number. If the commit message contains `#minor` or `#major`, it adds 1 to the minor or major number instead. The commit message becomes the release notes. The `version` in `pyproject.toml` is not used for releases.
 
-1. Change `version` in `pyproject.toml`.
-2. Run `uv lock`. This writes the new version to `uv.lock`.
-3. Commit the two files and push to `main`. Make sure the **Tests** workflow passes.
-4. Run `gh release create vX.Y.Z --generate-notes`. This makes the tag and the GitHub release. The release notes list the changes since the last release.
+- Do not run `gh release create` by hand.
+- Do not write `#minor` or `#major` in a commit message unless you want that release type. This includes text that only describes the tokens.
+- Each push to `main` is a release that the private digest runs at its next run. Put related changes in one push.
 
 ---
 
@@ -277,7 +276,7 @@ The `digest.py` script makes HTML for email clients. Email clients have limits. 
 
 ## 10. Dependencies
 
-- `pyproject.toml` is the source of truth. `uv.lock` pins the versions. GitHub Actions installs from the lock file with `uv sync --frozen`.
+- `pyproject.toml` is the source of truth. `uv.lock` pins the versions. The digest workflows install from the lock file with `uv sync --frozen`. The **Tests** workflow uses `--locked`.
 - To add a library:
   1. Run `uv add package-name`. This updates `pyproject.toml` and `uv.lock`.
   2. If the library needs special setup, describe the setup in `README.md` or in this file.
