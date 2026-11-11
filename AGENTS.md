@@ -214,7 +214,7 @@ The project has these workflows in `.github/workflows/`:
 | `tests.yml` | Tests | None |
 | `private-digest.yml` | Private digest | `task`, `url`, `apply`, `ref` (`workflow_call`) |
 
-`private-digest.yml` is the reusable workflow that the owner's private repository calls for all four digest workflows (README section 5.2). It runs the latest release, never `main`, and runs the tests first. The private repository calls it from `main`, so a change to it goes live at the next run with no release and no tests: keep its inputs and secret names stable, and keep its issue texts the same as the four digest workflows here.
+`private-digest.yml` is the reusable workflow that the owner's private repository calls for all four digest workflows (README section 5.2). It runs the latest release, never `main`, and runs the tests first. The private repository calls it from `main`, so a change to it goes live at the next run with no release and no tests: keep its inputs and secret names stable, and keep its issue texts in step with the four digest workflows here.
 
 The four digest workflows start only with `workflow_dispatch`. No workflow has a `schedule:` trigger. `tests.yml` runs `pytest` on each push to `main` and on each pull request. It has read-only permissions and uses no secrets. The README shows its status badge.
 
