@@ -24,9 +24,9 @@ from youtube_api import execute, is_playlist_not_found, resolve_channel
 # --- Gemini generation tuning -----------------------------------------------
 # Centralized here so tuning affects both the batched and single-video
 # summarization paths consistently.
-GEMINI_MODEL = "gemini-3.8-flash"
+GEMINI_MODEL = "gemini-3.5-flash-lite"
 # Used when GEMINI_MODEL returns an API error or times out.
-GEMINI_FALLBACK_MODEL = "gemini-3.5-flash-lite"
+GEMINI_FALLBACK_MODEL = "gemini-3.8-flash"
 # Per-request limit, so an overloaded model that never answers fails over
 # instead of stalling the run.
 GEMINI_TIMEOUT_SECONDS = 60
