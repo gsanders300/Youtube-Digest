@@ -1,0 +1,284 @@
+name: Private digest
+
+# Reusable workflow for a private repository that holds only channels.yml and the
+# secrets (README section 5.2). It runs the latest release of this code, never main,
+# against the caller's channels.yml, and commits channels.yml back for the tasks that
+# change it. The caller owns the trigger, the concurrency group, and the permissions:
+#   digest: actions: read, contents: read, issues: write
+#   add, repair, subscriptions: contents: write, issues: write
+on:
+  workflow_call:
+    inputs:
+      task:
+        description: 'digest, add, repair, or subscriptions'
+        type: string
+        required: true
+      url:
+        description: 'Channel URL for the add task'
+        type: string
+        default: ''
+      apply:
+        description: 'Repair task: write and commit the fixes'
+        type: boolean
+        default: false
+      ref:
+        description: 'Release tag to run instead of the latest (rollback)'
+        type: string
+        default: ''
+    # Each task needs only some of these; the caller passes those.
+    secrets:
+      YOUTUBE_API_KEY:
+        required: false
+      GEMINI_API_KEY:
+        required: false
+      GMAIL_USER:
+        required: false
+      GMAIL_APP_PASSWORD:
+        required: false
+      RECIPIENT_EMAIL:
+        required: false
+      YOUTUBE_CREDENTIALS:
+        required: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # In a called workflow this is the caller's repository.
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find Youtube-Digest release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.ref }}
+        run: |
+          tag=${REF:-$(gh release view --repo gsanders300/Youtube-Digest --json tagName -q .tagName)}
+          test -n "$tag"  # an empty ref would silently check out main
+          echo "Using Youtube-Digest $tag"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Youtube-Digest code
+        uses: actions/checkout@v4
+        with:
+          repository: gsanders300/Youtube-Digest
+          ref: ${{ steps.release.outputs.tag }}
+          path: app
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen --project app
+
+      # Releases are cut on every push with no Tests gate, so test the release here.
+      # Run from app/ so the tests use the sample channels.yml, not the caller's.
+      - name: Run tests
+        working-directory: app
+        run: uv run --frozen pytest
+
+      # The digest covers videos published since the last successful run started,
+      # so a late, failed, or skipped run neither drops nor repeats videos.
+      # Empty on the first run, which falls back to the last 24 hours.
+      # The caller's workflow file must be named daily_digest.yml.
+      - name: Find the last successful digest run
+        id: since
+        if: inputs.task == 'digest'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          since=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow daily_digest.yml \
+            --status success --limit 1 --json startedAt --jq '.[0].startedAt // ""')
+          echo "Last successful run started: ${since:-none}"
+          echo "since=$since" >> "$GITHUB_OUTPUT"
+
+      # The scripts read and write channels.yml in the working directory: the caller's.
+      - name: Run ${{ inputs.task }}
+        id: task
+        env:
+          TASK: ${{ inputs.task }}
+          CHANNEL_URL: ${{ inputs.url }}
+          APPLY: ${{ inputs.apply }}
+          DIGEST_SINCE: ${{ steps.since.outputs.since }}
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
+          YOUTUBE_CREDENTIALS: ${{ secrets.YOUTUBE_CREDENTIALS }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          case "$TASK" in
+            digest) args=(app/digest.py) ;;
+            add) args=(app/add_channel.py "$CHANNEL_URL") ;;
+            repair)
+              args=(app/repair_channel_ids.py)
+              if [ "$APPLY" = "true" ]; then args+=(--write); fi ;;
+            subscriptions) args=(app/get_subscriptions.py) ;;
+            *) echo "Unknown task: $TASK"; exit 1 ;;
+          esac
+          uv run --frozen --project app python "${args[@]}"
+
+      - name: Commit and push if changed
+        if: inputs.task == 'add' || inputs.task == 'subscriptions' || (inputs.task == 'repair' && inputs.apply)
+        env:
+          TASK: ${{ inputs.task }}
+          CHANNEL_URL: ${{ inputs.url }}
+        run: |
+          case "$TASK" in
+            add) message="Add channel ${CHANNEL_URL} to channels.yml" ;;
+            repair) message="Repair channel IDs in channels.yml" ;;
+            subscriptions) message="Update subscriptions in channels.yml" ;;
+          esac
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add channels.yml
+          git diff --staged --quiet || (git commit -m "$message" && git push)
+
+      # The subscriptions issue is about credentials, so only its script's failure opens it.
+      - name: Create issue on failure
+        if: failure() && (inputs.task != 'subscriptions' || steps.task.outcome == 'failure')
+        uses: actions/github-script@v7
+        env:
+          # Read through the environment, not ${{ }}, so the inputs can't inject script.
+          TASK: ${{ inputs.task }}
+          CHANNEL_URL: ${{ inputs.url }}
+          APPLY: ${{ inputs.apply }}
+        with:
+          script: |
+            const run = `[#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})`;
+            const time = new Date().toISOString();
+            const footer = (name) => `---\n*This issue was automatically created by the ${name} workflow.*`;
+            const issues_by_task = {
+              digest: {
+                label: 'digest-error',
+                title: '⚠️ YouTube Daily Digest Failed',
+                body: `## Daily Digest Workflow Failed
+
+            The **YouTube Daily Digest** workflow encountered an error.
+
+            ### Error Details
+            - **Workflow Run:** ${run}
+            - **Time:** ${time}
+
+            ### Possible Causes
+            - Missing or invalid API keys (YouTube, Gemini)
+            - Gmail authentication issues
+            - API quota exceeded
+            - Network connectivity problems
+            - The tests failed on the latest Youtube-Digest release
+
+            ### How to Diagnose
+            1. **Check the workflow logs:** ${run}
+            2. **Verify all secrets are set:** \`YOUTUBE_API_KEY\`, \`GEMINI_API_KEY\`, \`GMAIL_USER\`, \`GMAIL_APP_PASSWORD\`, \`RECIPIENT_EMAIL\`
+            3. **Test locally:** \`uv run python digest.py\`
+
+            ### Next Steps
+            - Review the error message in the workflow logs
+            - Verify API keys and quotas
+            - Close this issue once resolved
+
+            ${footer('Daily Digest')}`,
+              },
+              add: {
+                label: 'add-channel-error',
+                title: '⚠️ Add Channel Failed',
+                body: `## Add Channel Workflow Failed
+
+            The **Add Channel** workflow could not add a channel to \`channels.yml\`.
+
+            ### Error Details
+            - **Workflow Run:** ${run}
+            - **Time:** ${time}
+            - **Channel URL:** \`${process.env.CHANNEL_URL}\`
+
+            ### Possible Causes
+            - The URL is not a channel URL, @handle, or UC... channel ID
+            - No channel matches the URL
+            - Missing or invalid \`YOUTUBE_API_KEY\`, or API quota exceeded
+            - The push was rejected because \`channels.yml\` changed during the run
+
+            ### Next Steps
+            - Review the error message in the workflow logs
+            - Fix the cause, then run **Add Channel** again
+            - Close this issue once resolved
+
+            ${footer('Add Channel')}`,
+              },
+              repair: {
+                label: 'repair-error',
+                title: '⚠️ Repair Channel IDs Failed',
+                body: `## Repair Channel IDs Workflow Failed
+
+            The **Repair Channel IDs** workflow encountered an error.
+
+            ### Error Details
+            - **Workflow Run:** ${run}
+            - **Time:** ${time}
+            - **Apply:** ${process.env.APPLY}
+
+            ### Possible Causes
+            - Missing or invalid \`YOUTUBE_API_KEY\`, or API quota exceeded
+            - Network connectivity problems
+            - The push was rejected because \`channels.yml\` changed during the run
+
+            ### Next Steps
+            - Review the error message in the workflow logs
+            - Fix the cause, then run **Repair Channel IDs** again
+            - Close this issue once resolved
+
+            ${footer('Repair Channel IDs')}`,
+              },
+              subscriptions: {
+                label: 'credentials-error',
+                title: '🔐 YouTube Credentials Need Renewal',
+                body: `## Credentials Error Detected
+
+            The **Update Subscriptions** workflow failed, likely due to expired or invalid YouTube OAuth credentials.
+
+            ### Error Details
+            - **Workflow Run:** ${run}
+            - **Time:** ${time}
+
+            ### How to Fix
+            1. **Run the OAuth flow locally:** \`uv run python get_subscriptions.py\`
+            2. **Complete the browser authentication**
+            3. **Copy the JSON output** between the dashed lines
+            4. **Update the GitHub Secret:** go to [Repository Secrets](/${{ github.repository }}/settings/secrets/actions) and update \`YOUTUBE_CREDENTIALS\` with the new JSON
+            5. **Close this issue** once the credentials are updated
+
+            ### Common Causes
+            - OAuth refresh token expired (typically after 6 months of inactivity)
+            - User revoked access to the application
+            - Invalid credential format in GitHub Secrets
+
+            ${footer('Update Subscriptions')}`,
+              },
+            };
+            const issue = issues_by_task[process.env.TASK];
+            if (!issue) {
+              core.setFailed(`Unknown task: ${process.env.TASK}`);
+              return;
+            }
+
+            // Check if an issue already exists
+            const open = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: [issue.label]
+            });
+
+            if (open.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: issue.title,
+                body: issue.body,
+                labels: [issue.label, 'automated']
+              });
+            }

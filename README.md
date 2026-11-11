@@ -295,35 +295,46 @@ This example runs the digest at 12:00 UTC each day. Change the cron value to the
 If you fork this public repository, your `channels.yml` is public too. To keep the list private, use two repositories:
 
 - This public repository has the code.
-- A private repository has your `channels.yml`, the workflow files, and the secrets.
+- A private repository has your `channels.yml`, four short workflow files, and the secrets.
 
-Each workflow in the private repository gets the code from the public repository when it runs. The scripts read and write `channels.yml` in the folder where they run. Thus they use the list in the private repository.
+Each workflow in the private repository calls the reusable workflow `.github/workflows/private-digest.yml` in this repository. That workflow gets the latest release of the code, runs the tests, and runs one script. The scripts read and write `channels.yml` in the private repository. The workflows that change the list commit it there.
 
 1. Make a private repository. Put your `channels.yml` in its root folder.
-2. Copy the files from `.github/workflows/` into the private repository.
-3. In each workflow, add a second checkout step after the first one. Then change the `uv` commands as this example shows:
+2. Add four workflow files to `.github/workflows/` in the private repository. This is `daily_digest.yml`:
    ```yaml
-   - name: Checkout repository
-     uses: actions/checkout@v4
+   name: YouTube Daily Digest
 
-   - name: Checkout code
-     uses: actions/checkout@v4
-     with:
-       repository: gsanders300/Youtube-Digest
-       path: app
+   on:
+     workflow_dispatch:
 
-   - name: Install uv
-     uses: astral-sh/setup-uv@v5
-     with:
-       enable-cache: true
-
-   - name: Install dependencies
-     run: uv sync --frozen --no-dev --project app
-
-   - name: Run digest script
-     run: uv run --frozen --no-dev --project app python app/digest.py
+   jobs:
+     build:
+       permissions:
+         actions: read
+         contents: read
+         issues: write
+       uses: gsanders300/Youtube-Digest/.github/workflows/private-digest.yml@main
+       with:
+         task: digest
+       secrets:
+         YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+         GMAIL_USER: ${{ secrets.GMAIL_USER }}
+         GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+         RECIPIENT_EMAIL: ${{ secrets.RECIPIENT_EMAIL }}
    ```
+   Keep the file name `daily_digest.yml`. The digest uses it to find its last successful run.
+3. Make the other three files the same way. Give each job `contents: write` and `issues: write`, and the `concurrency` group `channels-yml`:
+
+   | File | `with:` | Secrets |
+   |---|---|---|
+   | `add_channel.yml` | `task: add` and `url:` | `YOUTUBE_API_KEY` |
+   | `repair_channel_ids.yml` | `task: repair` and `apply:` | `YOUTUBE_API_KEY` |
+   | `update_subscriptions.yml` | `task: subscriptions` | `YOUTUBE_CREDENTIALS` |
+
 4. Store the secrets in the private repository (see section 1).
+
+Each push to `main` here makes a release, and the next run uses it. To go back to an older release, add `ref: vX.Y.Z` under `with:`.
 
 To run a script on your computer, clone both repositories into the same parent folder. Run the script from the private folder:
 
