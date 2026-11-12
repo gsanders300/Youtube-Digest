@@ -1,7 +1,8 @@
 version: 2
 
-# Weekly grouped updates. dependabot-auto-merge.yml merges them once the test check
-# passes, and each merge becomes a patch release. Major versions stay a manual decision.
+# Weekly grouped updates. dependabot-auto-merge.yml merges the minor and patch groups once
+# the test check passes, and each merge becomes a patch release. Major versions get their
+# own "-major" groups, which auto-merge skips: review and merge those by hand.
 # Pushing a change to this file starts a Dependabot run right away.
 updates:
   - package-ecosystem: uv
@@ -17,9 +18,10 @@ updates:
     groups:
       python-packages:
         patterns: ["*"]
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-major"]
+        update-types: [minor, patch]
+      python-packages-major:
+        patterns: ["*"]
+        update-types: [major]
 
   - package-ecosystem: github-actions
     directory: /
@@ -31,6 +33,7 @@ updates:
     groups:
       github-actions:
         patterns: ["*"]
-    ignore:
-      - dependency-name: "*"
-        update-types: ["version-update:semver-major"]
+        update-types: [minor, patch]
+      github-actions-major:
+        patterns: ["*"]
+        update-types: [major]
