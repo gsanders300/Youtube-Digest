@@ -16,7 +16,7 @@ import pytest
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from digest import VideoDetail, YouTubeDigest
+from digest import VideoDetail, YouTubeDigest, main
 from youtube_api import ResolvedChannel
 
 
@@ -373,3 +373,47 @@ class TestRunStalePlaylistRecovery:
         html, subject = digest.send_email.call_args.args
         assert "error fetching videos" in html
         assert "(no new videos)" in subject
+
+
+class TestMain:
+    """Tests for main(): the required-secret check before the run."""
+
+    SECRETS = (
+        "YOUTUBE_API_KEY",
+        "GEMINI_API_KEY",
+        "GMAIL_USER",
+        "GMAIL_APP_PASSWORD",
+        "RECIPIENT_EMAIL",
+    )
+
+    def test_missing_secrets_exit_1_and_are_named(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Missing secrets stop the run before any client is built."""
+        for name in self.SECRETS:
+            monkeypatch.setenv(name, "set")
+        monkeypatch.delenv("YOUTUBE_API_KEY")
+        monkeypatch.setenv("GMAIL_APP_PASSWORD", "")
+
+        with (
+            patch("digest.YouTubeDigest") as digest_cls,
+            pytest.raises(SystemExit) as exc,
+        ):
+            main()
+
+        assert exc.value.code == 1
+        digest_cls.assert_not_called()
+        out = capsys.readouterr().out
+        assert "YOUTUBE_API_KEY" in out
+        assert "GMAIL_APP_PASSWORD" in out
+        assert "GEMINI_API_KEY" not in out
+
+    def test_all_secrets_set_runs_digest(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """With every secret set, main() builds the digest and runs it."""
+        for name in self.SECRETS:
+            monkeypatch.setenv(name, "set")
+
+        with patch("digest.YouTubeDigest") as digest_cls:
+            main()
+
+        digest_cls.return_value.run.assert_called_once_with()

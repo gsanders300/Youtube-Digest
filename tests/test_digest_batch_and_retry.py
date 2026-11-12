@@ -9,7 +9,10 @@ from unittest.mock import MagicMock, patch
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from google.genai import errors
+
 from digest import (
+    GEMINI_BATCH_RETRY_DELAY_SECONDS,
     GEMINI_BATCH_SIZE,
     VideoDetail,
     YouTubeDigest,
@@ -204,6 +207,51 @@ class TestSummarizeBatchViaGemini:
             result = digest._summarize_batch_via_gemini(batch)
 
         assert result == {}
+
+    def test_server_error_retries_batch_once(self) -> None:
+        """A server error on both models gets one batch retry after a delay."""
+        digest = _make_digest()
+        batch = _make_videos(2)
+        digest.genai_client.models.generate_content.side_effect = [
+            errors.ServerError(503, {"error": {"message": "overloaded"}}),
+            errors.ServerError(504, {"error": {"message": "deadline"}}),
+            _make_gemini_response('{"vid0": "Summary zero.", "vid1": "Summary one."}'),
+        ]
+
+        with patch("time.sleep") as mock_sleep:
+            result = digest._summarize_batch_via_gemini(batch)
+
+        assert result == {"vid0": "Summary zero.", "vid1": "Summary one."}
+        mock_sleep.assert_any_call(GEMINI_BATCH_RETRY_DELAY_SECONDS)
+
+    def test_server_error_on_retry_returns_empty_dict(self) -> None:
+        """If the retry also fails, the batch returns {} for per-video fallback."""
+        digest = _make_digest()
+        batch = _make_videos(1)
+        digest.genai_client.models.generate_content.side_effect = errors.ServerError(
+            503, {"error": {"message": "overloaded"}}
+        )
+
+        with patch("time.sleep"):
+            result = digest._summarize_batch_via_gemini(batch)
+
+        assert result == {}
+        # Two models on the first try, two on the retry.
+        assert digest.genai_client.models.generate_content.call_count == 4
+
+    def test_client_error_is_not_retried(self) -> None:
+        """A client error such as a 429 falls through without a batch retry."""
+        digest = _make_digest()
+        batch = _make_videos(1)
+        digest.genai_client.models.generate_content.side_effect = errors.ClientError(
+            429, {"error": {"message": "quota"}}
+        )
+
+        with patch("time.sleep"):
+            result = digest._summarize_batch_via_gemini(batch)
+
+        assert result == {}
+        assert digest.genai_client.models.generate_content.call_count == 2
 
 
 class TestStripJsonFences:

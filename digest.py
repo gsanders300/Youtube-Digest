@@ -3,6 +3,7 @@ import datetime
 import json
 import random
 import smtplib
+import sys
 import time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -34,6 +35,9 @@ GEMINI_TEMPERATURE = 0.7
 GEMINI_MAX_OUTPUT_TOKENS = 1024
 GEMINI_BATCH_MAX_OUTPUT_TOKENS = 4096
 GEMINI_BATCH_SIZE = 12  # Videos summarized per batched Gemini call.
+# Wait before retrying a batch after a server error, so an overloaded model
+# gets one more try before the batch splits into one call per video.
+GEMINI_BATCH_RETRY_DELAY_SECONDS = 10
 DESCRIPTION_CHAR_LIMIT = 6000  # Max description chars sent to Gemini per video.
 
 # How far back to look for "new" videos when DIGEST_SINCE is not set.
@@ -415,6 +419,9 @@ class YouTubeDigest:
     ) -> dict[str, str]:
         """Sends one Gemini request to summarize multiple videos at once.
 
+        After a Gemini server error (5xx), waits GEMINI_BATCH_RETRY_DELAY_SECONDS
+        and retries the request once.
+
         Args:
             batch: Mapping of video ID to VideoDetail for a single chunk.
 
@@ -456,7 +463,15 @@ class YouTubeDigest:
 
         response = None
         try:
-            response = self._generate_content(prompt, gen_config)
+            try:
+                response = self._generate_content(prompt, gen_config)
+            except errors.ServerError as e:
+                print(
+                    f"Batch summary failed ({e}); retrying in "
+                    f"{GEMINI_BATCH_RETRY_DELAY_SECONDS}s..."
+                )
+                time.sleep(GEMINI_BATCH_RETRY_DELAY_SECONDS)
+                response = self._generate_content(prompt, gen_config)
 
             if not response or not response.text:
                 print("Empty response from Gemini for batch summary.")
@@ -711,5 +726,25 @@ class YouTubeDigest:
         self.send_email(html, subject)
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Entry point: checks the required secrets, then sends the digest.
+
+    Exits with status 1 and names every missing secret, so a run without
+    secrets fails before any API call.
+    """
+    required = {
+        "YOUTUBE_API_KEY": environment.youtube_api_key(),
+        "GEMINI_API_KEY": environment.gemini_api_key(),
+        "GMAIL_USER": environment.gmail_user(),
+        "GMAIL_APP_PASSWORD": environment.gmail_app_password(),
+        "RECIPIENT_EMAIL": environment.recipient_email(),
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        print(f"Missing required secrets: {', '.join(missing)}. Aborting.")
+        sys.exit(1)
     YouTubeDigest().run()
+
+
+if __name__ == "__main__":
+    main()

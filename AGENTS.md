@@ -108,7 +108,7 @@ Each caller uses only the steps that it can afford:
 The digest makes summaries in batches, not one video at a time.
 
 1. `YouTubeDigest.run` collects all new videos from all channels first.
-2. It calls `summarize_descriptions_batch`. That function puts the videos into groups of `GEMINI_BATCH_SIZE`. For each group, it asks Gemini for one JSON object that maps each video ID to its summary.
+2. It calls `summarize_descriptions_batch`. That function puts the videos into groups of `GEMINI_BATCH_SIZE`. For each group, it asks Gemini for one JSON object that maps each video ID to its summary. After a Gemini server error (5xx), it waits `GEMINI_BATCH_RETRY_DELAY_SECONDS` and tries the group once more.
 3. If a video is missing from the parsed response, the digest calls `summarize_description` for that one video.
 
 Keep this batch-then-fallback structure. It keeps the number of Gemini calls low, and each video still gets a summary.
