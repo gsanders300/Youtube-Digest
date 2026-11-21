@@ -112,6 +112,7 @@ The digest makes summaries in batches, not one video at a time.
 3. If a video is missing from the parsed response, or the request for the group fails, the digest calls `summarize_description` for that one video.
 4. After a model returns a per-day 429, `_generate_content` does not call that model again in the run (`exhausted_models`). `summarize_description` does not retry a 429. Without this, the per-video calls in step 3 use up the free-tier quota and then keep failing. On November 20, 2026, the 429 errors gave a free-tier limit of 20 requests per day and 5 per minute for each of `gemini-4-hydrogen` and `gemini-3.8-flash`. Before you change `GEMINI_MODEL`, make sure that its daily limit allows a day of per-video calls.
 5. A video that gets no summary shows `Summary unavailable: <reason>.` (`_failure_reason`). The email shows a note at the top with the number of these videos and the reasons.
+6. Above the notes, the email shows a **Run status** box: the problems, every retry and its cause (`self.retries` for Gemini, `youtube_api.retries_by_status` for the YouTube API), and the number of videos that each model summarized (`self.answered_by`). If you add a retry or a fallback, record it in `self.retries`. If there is a problem, the subject ends in `[problems]`.
 
 Keep this batch-then-fallback structure. It keeps the number of Gemini calls low, and each video still gets a summary when Gemini can answer.
 

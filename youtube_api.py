@@ -8,6 +8,7 @@ stored channel ID, and title) into a verified channel ID and uploads playlist.
 from __future__ import annotations
 
 import time
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,6 +17,9 @@ import googleapiclient.errors
 YOUTUBE_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 YOUTUBE_API_MAX_RETRIES = 3
 YOUTUBE_API_RETRY_BASE_DELAY_SECONDS = 2
+
+# Retries `execute` made, by HTTP status, so the digest email can report them.
+retries_by_status: Counter[int | None] = Counter()
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,7 @@ def execute(request: Any) -> dict[str, Any]:
                 f"YouTube API error (status {status}); retrying in {delay}s "
                 f"(attempt {attempt + 1}/{YOUTUBE_API_MAX_RETRIES})..."
             )
+            retries_by_status[status] += 1
             time.sleep(delay)
             attempt += 1
 
@@ -86,6 +91,28 @@ def is_playlist_not_found(error: Exception) -> bool:
         return False
     status = error.resp.status if error.resp is not None else None
     return status == 404 and "playlistnotfound" in str(error).lower()
+
+
+def error_reason(error: Exception) -> str:
+    """Describes a failed YouTube API call in a short phrase for the email.
+
+    Never includes the request URL, which carries the API key.
+
+    Args:
+        error: The exception raised by a YouTube API call.
+
+    Returns:
+        The HTTP status and reason, for example "HTTP 403 quotaExceeded", or
+        the exception type for a non-HTTP error.
+    """
+    if isinstance(error, googleapiclient.errors.HttpError):
+        reasons = [
+            detail.get("reason")
+            for detail in error.error_details or []
+            if isinstance(detail, dict) and detail.get("reason")
+        ]
+        return f"HTTP {error.status_code} {', '.join(reasons) or error.reason}"
+    return type(error).__name__
 
 
 def normalize_handle(custom_url: str | None) -> str | None:

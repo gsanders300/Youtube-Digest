@@ -21,7 +21,8 @@ from pydantic import BaseModel
 
 import channel_list
 import environment
-from youtube_api import execute, is_playlist_not_found, resolve_channel
+import youtube_api
+from youtube_api import error_reason, execute, is_playlist_not_found, resolve_channel
 
 # --- Gemini generation tuning -----------------------------------------------
 # Centralized here so tuning affects both the batched and single-video
@@ -181,6 +182,11 @@ class YouTubeDigest:
         # Models whose daily quota is used up, with the 429 they returned.
         # They are not called again this run.
         self.exhausted_models: dict[str, errors.APIError] = {}
+        # For the email's run status: every Gemini retry by cause, the model
+        # that answered the last successful call, and each video's model.
+        self.retries: Counter[str] = Counter()
+        self.last_model: str | None = None
+        self.answered_by: dict[str, str] = {}
 
     def get_recent_videos(self, playlist_id: str) -> list[dict[str, Any]]:
         """Fetches videos published at or after self.cutoff from a playlist."""
@@ -318,6 +324,9 @@ class YouTubeDigest:
                 continue
             if error is not None:
                 print(f"  Trying {model}...")
+                self.retries[
+                    f"{model} took over after {GEMINI_MODEL} failed: {_failure_reason(error)}"
+                ] += 1
             try:
                 response = self.genai_client.models.generate_content(
                     model=model, contents=prompt, config=config
@@ -330,6 +339,7 @@ class YouTubeDigest:
                 continue
             if model != GEMINI_MODEL:
                 print(f"  {model} answered.")
+            self.last_model = model
             return response
         raise error
 
@@ -378,6 +388,9 @@ class YouTubeDigest:
                     "  Warning: summary was truncated (MAX_TOKENS); retrying with a "
                     "larger token budget..."
                 )
+                self.retries[
+                    "summary cut off (MAX_TOKENS); re-asked with a larger budget"
+                ] += 1
                 retry_config = types.GenerateContentConfig(
                     max_output_tokens=gen_config.max_output_tokens * 2,
                     temperature=gen_config.temperature,
@@ -406,6 +419,7 @@ class YouTubeDigest:
             # Simple retry with a longer wait
             try:
                 print("Retrying with 5s delay...")
+                self.retries[f"one video re-asked after {_failure_reason(e)}"] += 1
                 time.sleep(5)
                 response = self._generate_content(prompt, gen_config)
                 return (
@@ -473,11 +487,18 @@ class YouTubeDigest:
             batch_ids = video_ids[start : start + GEMINI_BATCH_SIZE]
             batch = {vid: videos[vid] for vid in batch_ids}
             summaries = self._summarize_batch_via_gemini(batch)
+            missed = [vid for vid in batch_ids if not summaries.get(vid)]
+            if summaries and missed:
+                # A failed batch records its own cause in _summarize_batch_via_gemini.
+                self.retries["video missing from batch reply; re-asked alone"] += len(
+                    missed
+                )
 
             for vid in batch_ids:
                 summary = summaries.get(vid)
                 if summary:
                     videos[vid].summary = summary
+                    self.answered_by[vid] = self.last_model or "unknown"
                 else:
                     print(
                         f"  Falling back to single-video summary for: {videos[vid].title}"
@@ -487,6 +508,8 @@ class YouTubeDigest:
                         f"Description: {videos[vid].description}"
                     )
                     videos[vid].summary = self.summarize_description(context)
+                    if not videos[vid].summary.startswith(SUMMARY_UNAVAILABLE):
+                        self.answered_by[vid] = self.last_model or "unknown"
 
     def _summarize_batch_via_gemini(
         self, batch: dict[str, VideoDetail]
@@ -544,11 +567,15 @@ class YouTubeDigest:
                     f"Batch summary failed ({e}); retrying in "
                     f"{GEMINI_BATCH_RETRY_DELAY_SECONDS}s..."
                 )
+                self.retries[f"batch re-sent after {_failure_reason(e)}"] += 1
                 time.sleep(GEMINI_BATCH_RETRY_DELAY_SECONDS)
                 response = self._generate_content(prompt, gen_config)
 
             if not response or not response.text:
                 print("Empty response from Gemini for batch summary.")
+                self._note_batch_failure(
+                    len(batch), "Gemini returned an empty response"
+                )
                 return {}
 
             raw_text = self._strip_json_fences(response.text)
@@ -559,6 +586,7 @@ class YouTubeDigest:
                     "Batch summary response was not a JSON object; falling back "
                     "to per-video summaries for this batch."
                 )
+                self._note_batch_failure(len(batch), "reply was not a JSON object")
                 return {}
 
             return {
@@ -573,18 +601,30 @@ class YouTubeDigest:
                     f"Batch summary was truncated (MAX_TOKENS) and produced invalid "
                     f"JSON: {e}. Falling back to per-video summaries for this batch."
                 )
+                self._note_batch_failure(len(batch), "reply cut off (MAX_TOKENS)")
             else:
                 print(
                     f"Failed to parse batch summary JSON: {e}. Falling back to "
                     "per-video summaries for this batch."
                 )
+                self._note_batch_failure(len(batch), "reply was invalid JSON")
             return {}
         except Exception as e:
             print(
                 f"Error generating batch summary: {e}. Falling back to per-video "
                 "summaries for this batch."
             )
+            self._note_batch_failure(len(batch), _failure_reason(e))
             return {}
+
+    def _note_batch_failure(self, size: int, reason: str) -> None:
+        """Records that a failed batch's videos will be re-asked one at a time.
+
+        Args:
+            size: The number of videos in the batch.
+            reason: A short phrase that names the cause.
+        """
+        self.retries[f"batch failed ({reason}); video re-asked alone"] += size
 
     @staticmethod
     def _strip_json_fences(text: str) -> str:
@@ -644,6 +684,7 @@ class YouTubeDigest:
         """Main execution logic for the digest service."""
         tz_eastern = ZoneInfo("America/New_York")
         start_time = datetime.datetime.now(tz_eastern)
+        youtube_api.retries_by_status.clear()
 
         channels = channel_list.load()
 
@@ -679,7 +720,9 @@ class YouTubeDigest:
                     )
                 except Exception as e:
                     print(f"Error resolving channel {handle}: {e}")
-                    skipped_channels.append(f"{handle}: error resolving channel")
+                    skipped_channels.append(
+                        f"{handle}: error resolving channel ({error_reason(e)})"
+                    )
                     continue
                 if not resolved:
                     print(f"Could not resolve channel {handle}")
@@ -701,7 +744,9 @@ class YouTubeDigest:
                 )
             except Exception as e:
                 print(f"Error fetching videos for {handle}: {e}")
-                skipped_channels.append(f"{handle}: error fetching videos")
+                skipped_channels.append(
+                    f"{handle}: error fetching videos ({error_reason(e)})"
+                )
                 continue
 
             if fetched_playlist_id != uploads_playlist_id:
@@ -721,7 +766,9 @@ class YouTubeDigest:
                 details = self.get_video_details(video_ids)
             except Exception as e:
                 print(f"Error fetching video details for {handle}: {e}")
-                skipped_channels.append(f"{handle}: error fetching video details")
+                skipped_channels.append(
+                    f"{handle}: error fetching video details ({error_reason(e)})"
+                )
                 continue
 
             if not details:
@@ -754,11 +801,53 @@ class YouTubeDigest:
         count_suffix = (
             f"({total_videos} new {video_word})" if total_videos else "(no new videos)"
         )
-        subject = f"YouTube Digest - {date_str} {count_suffix}"
+        failure_counts = Counter(
+            v.summary.removeprefix(f"{SUMMARY_UNAVAILABLE}: ")
+            for v in all_videos.values()
+            if v.summary and v.summary.startswith(SUMMARY_UNAVAILABLE)
+        )
+        problems = []
+        if skipped_channels:
+            problems.append(f"{len(skipped_channels)} channel(s) not checked")
+        if failure_counts:
+            problems.append(
+                f"{failure_counts.total()} of {total_videos} video(s) have no summary"
+            )
+        retries = [f"{count}x Gemini: {why}" for why, count in self.retries.items()]
+        retries += [
+            f"{count}x YouTube API: HTTP {status}"
+            for status, count in youtube_api.retries_by_status.items()
+        ]
+        models = Counter(self.answered_by.values())
+        if failure_counts:
+            models["none (no summary)"] = failure_counts.total()
+        status_rows = [
+            (
+                "Problems",
+                "; ".join(problems) + " (details below)" if problems else "None",
+            ),
+            ("Retries", "; ".join(retries) or "None"),
+            (
+                "Models that answered",
+                ", ".join(f"{model}: {n} video(s)" for model, n in models.items())
+                or "No videos to summarize",
+            ),
+        ]
+
+        flag = " [problems]" if problems else ""
+        subject = f"YouTube Digest - {date_str} {count_suffix}{flag}"
 
         html = "<html><body style='font-family: Arial, sans-serif;'>"
         html += "<h1>YouTube Daily Digest</h1>"
         html += f"<p>Date: {date_str} | Started: {start_str} | Completed: {end_str}</p>"
+        html += (
+            "<div style='margin: 15px 0; padding: 10px 15px; background-color: "
+            "#f1f3f4; border-radius: 4px; font-size: 13px; color: #333;'>"
+            "<strong>Run status</strong>"
+        )
+        for label, text in status_rows:
+            html += f"<div><strong>{escape(label)}:</strong> {escape(text)}</div>"
+        html += "</div>"
 
         note_open = (
             "<div style='margin: 15px 0; padding: 10px 15px; background-color: "
@@ -776,11 +865,6 @@ class YouTubeDigest:
                 html += f"<li>{escape(reason)}</li>"
             html += "</ul></div>"
 
-        failure_counts = Counter(
-            v.summary.removeprefix(f"{SUMMARY_UNAVAILABLE}: ")
-            for v in all_videos.values()
-            if v.summary and v.summary.startswith(SUMMARY_UNAVAILABLE)
-        )
         if failure_counts:
             html += note_open
             html += (

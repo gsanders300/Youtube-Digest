@@ -16,7 +16,9 @@ import pytest
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from digest import VideoDetail, YouTubeDigest, main
+from google.genai import errors
+
+from digest import GEMINI_FALLBACK_MODEL, GEMINI_MODEL, VideoDetail, YouTubeDigest, main
 from youtube_api import ResolvedChannel
 
 
@@ -254,6 +256,59 @@ class TestRunSkippedChannelReporting:
         html, _subject = digest.send_email.call_args.args
         assert "1 of 2 video(s) have no summary" in html
         assert "<li>1 video(s): Gemini was overloaded (503).</li>" in html
+
+
+class TestRunStatus:
+    """Tests for the run status block: problems, retries, and answering models."""
+
+    def test_fallback_answer_reports_retry_cause_and_model(self) -> None:
+        """A 503 on the primary model shows as a retry, and the fallback is named."""
+        digest = _make_digest()
+        digest.get_recent_videos = MagicMock(
+            side_effect=[[_video_item("vid1", "Channel A")], []]
+        )
+        digest.get_video_details = MagicMock(
+            return_value={"vid1": _video_detail("vid1", "Video One")}
+        )
+        answer = MagicMock(text='{"vid1": "Isn’t “this” great 🚀."}', candidates=[])
+        digest.genai_client.models.generate_content.side_effect = [
+            errors.ServerError(503, {"error": {"message": "overloaded"}}),
+            answer,
+        ]
+        digest.send_email = MagicMock()
+
+        with (
+            patch("builtins.open", mock_open(read_data=CHANNELS_YML)),
+            patch("time.sleep"),
+        ):
+            digest.run()
+
+        html, subject = digest.send_email.call_args.args
+        assert "<strong>Problems:</strong> None" in html
+        assert (
+            f"1x Gemini: {GEMINI_FALLBACK_MODEL} took over after {GEMINI_MODEL} "
+            "failed: Gemini was overloaded (503)"
+        ) in html
+        assert f"{GEMINI_FALLBACK_MODEL}: 1 video(s)" in html
+        assert "Isn’t “this” great 🚀." in html
+        assert "[problems]" not in subject
+
+    def test_skipped_channel_names_cause_and_flags_subject(self) -> None:
+        """A failed channel fetch shows its HTTP cause, and the subject is flagged."""
+        digest = _make_digest()
+        digest.get_recent_videos = MagicMock(
+            side_effect=[_http_error(403, "forbidden"), []]
+        )
+        digest.send_email = MagicMock()
+
+        with patch("builtins.open", mock_open(read_data=CHANNELS_YML)):
+            digest.run()
+
+        html, subject = digest.send_email.call_args.args
+        assert "error fetching videos (HTTP 403 forbidden)" in html
+        assert "1 channel(s) not checked (details below)" in html
+        assert "No videos to summarize" in html
+        assert subject.endswith("(no new videos) [problems]")
 
 
 class TestRunBatchSummarizationWiring:
