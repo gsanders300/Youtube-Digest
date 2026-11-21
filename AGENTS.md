@@ -109,9 +109,11 @@ The digest makes summaries in batches, not one video at a time.
 
 1. `YouTubeDigest.run` collects all new videos from all channels first.
 2. It calls `summarize_descriptions_batch`. That function puts the videos into groups of `GEMINI_BATCH_SIZE`. For each group, it asks Gemini for one JSON object that maps each video ID to its summary. After a Gemini server error (5xx), it waits `GEMINI_BATCH_RETRY_DELAY_SECONDS` and tries the group once more.
-3. If a video is missing from the parsed response, the digest calls `summarize_description` for that one video.
+3. If a video is missing from the parsed response, or the request for the group fails, the digest calls `summarize_description` for that one video.
+4. After a model returns a per-day 429, `_generate_content` does not call that model again in the run (`exhausted_models`). `summarize_description` does not retry a 429. Without this, the per-video calls in step 3 use up the free-tier quota and then keep failing. On November 20, 2026, the 429 errors gave a free-tier limit of 20 requests per day and 5 per minute for each of `gemini-4-hydrogen` and `gemini-3.8-flash`. Before you change `GEMINI_MODEL`, make sure that its daily limit allows a day of per-video calls.
+5. A video that gets no summary shows `Summary unavailable: <reason>.` (`_failure_reason`). The email shows a note at the top with the number of these videos and the reasons.
 
-Keep this batch-then-fallback structure. It keeps the number of Gemini calls low, and each video still gets a summary.
+Keep this batch-then-fallback structure. It keeps the number of Gemini calls low, and each video still gets a summary when Gemini can answer.
 
 ### 2.5 Order of the videos in the email
 

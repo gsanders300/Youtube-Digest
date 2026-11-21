@@ -5,6 +5,7 @@ import random
 import smtplib
 import sys
 import time
+from collections import Counter
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from html import escape
@@ -25,7 +26,7 @@ from youtube_api import execute, is_playlist_not_found, resolve_channel
 # --- Gemini generation tuning -----------------------------------------------
 # Centralized here so tuning affects both the batched and single-video
 # summarization paths consistently.
-GEMINI_MODEL = "gemini-4-hydrogen"
+GEMINI_MODEL = "gemini-3.5-flash-lite"
 # Used when GEMINI_MODEL returns an API error or times out.
 GEMINI_FALLBACK_MODEL = "gemini-3.8-flash"
 # Per-request limit, so an overloaded model that never answers fails over
@@ -39,9 +40,63 @@ GEMINI_BATCH_SIZE = 12  # Videos summarized per batched Gemini call.
 # gets one more try before the batch splits into one call per video.
 GEMINI_BATCH_RETRY_DELAY_SECONDS = 10
 DESCRIPTION_CHAR_LIMIT = 6000  # Max description chars sent to Gemini per video.
+# Start of the text shown in place of a summary that Gemini could not write.
+SUMMARY_UNAVAILABLE = "Summary unavailable"
 
 # How far back to look for "new" videos when DIGEST_SINCE is not set.
 LOOKBACK_HOURS = 24
+
+
+def _is_daily_quota_error(error: Exception) -> bool:
+    """Checks whether an error is a 429 for a model's per-day request quota.
+
+    Args:
+        error: The exception raised by a Gemini call.
+
+    Returns:
+        True if the error is a 429 whose quota ID names a per-day limit.
+    """
+    return (
+        isinstance(error, errors.APIError)
+        and error.code == 429
+        and "PerDay" in str(error.details)
+    )
+
+
+def _failure_reason(error: Exception) -> str:
+    """Describes a failed Gemini call in a short phrase for the email.
+
+    Args:
+        error: The exception raised by the last Gemini call.
+
+    Returns:
+        A phrase that names the cause, for example the daily quota.
+    """
+    if _is_daily_quota_error(error):
+        return "the Gemini free-tier daily request limit is used up"
+    if isinstance(error, httpx2.TimeoutException):
+        return f"Gemini did not answer within {GEMINI_TIMEOUT_SECONDS} seconds"
+    if isinstance(error, errors.APIError):
+        if error.code == 429:
+            return "the Gemini free-tier per-minute request limit was hit"
+        if error.code == 503:
+            return "Gemini was overloaded (503)"
+        if error.code == 504:
+            return "Gemini timed out (504)"
+        return f"Gemini returned error {error.code} {error.status}"
+    return f"unexpected error ({type(error).__name__})"
+
+
+def _unavailable(reason: str) -> str:
+    """Builds the text shown in place of a missing summary.
+
+    Args:
+        reason: A short phrase that names the cause.
+
+    Returns:
+        The placeholder text, for example "Summary unavailable: <reason>."
+    """
+    return f"{SUMMARY_UNAVAILABLE}: {reason}."
 
 
 def lookback_cutoff(now: datetime.datetime) -> datetime.datetime:
@@ -123,6 +178,9 @@ class YouTubeDigest:
         self.cutoff = lookback_cutoff(
             datetime.datetime.now(ZoneInfo("America/New_York"))
         )
+        # Models whose daily quota is used up, with the 429 they returned.
+        # They are not called again this run.
+        self.exhausted_models: dict[str, errors.APIError] = {}
 
     def get_recent_videos(self, playlist_id: str) -> list[dict[str, Any]]:
         """Fetches videos published at or after self.cutoff from a playlist."""
@@ -239,6 +297,8 @@ class YouTubeDigest:
     ) -> types.GenerateContentResponse:
         """Calls GEMINI_MODEL, then GEMINI_FALLBACK_MODEL on an API error or timeout.
 
+        Skips a model whose daily quota ran out earlier in this run.
+
         Args:
             prompt: The prompt text to send.
             config: The generation config to use for both models.
@@ -247,20 +307,31 @@ class YouTubeDigest:
             The response from whichever model answered first.
 
         Raises:
-            errors.APIError: If the fallback model returns an API error.
-            httpx2.TimeoutException: If the fallback model times out.
+            errors.APIError: If the last model tried returns an API error, or
+                both models' daily quotas are used up.
+            httpx2.TimeoutException: If the last model tried times out.
         """
-        try:
-            return self.genai_client.models.generate_content(
-                model=GEMINI_MODEL, contents=prompt, config=config
-            )
-        except (errors.APIError, httpx2.TimeoutException) as e:
-            print(f"  {GEMINI_MODEL} failed ({e!r}); trying {GEMINI_FALLBACK_MODEL}...")
-            response = self.genai_client.models.generate_content(
-                model=GEMINI_FALLBACK_MODEL, contents=prompt, config=config
-            )
-            print(f"  {GEMINI_FALLBACK_MODEL} answered.")
+        error: Exception | None = None
+        for model in (GEMINI_MODEL, GEMINI_FALLBACK_MODEL):
+            if model in self.exhausted_models:
+                error = self.exhausted_models[model]
+                continue
+            if error is not None:
+                print(f"  Trying {model}...")
+            try:
+                response = self.genai_client.models.generate_content(
+                    model=model, contents=prompt, config=config
+                )
+            except (errors.APIError, httpx2.TimeoutException) as e:
+                print(f"  {model} failed ({e!r})")
+                if _is_daily_quota_error(e):
+                    self.exhausted_models[model] = e
+                error = e
+                continue
+            if model != GEMINI_MODEL:
+                print(f"  {model} answered.")
             return response
+        raise error
 
     def summarize_description(self, text_to_summarize: str) -> str:
         """Generates a 2-3 sentence summary of the video content using Gemini.
@@ -300,7 +371,7 @@ class YouTubeDigest:
 
             if not response or not response.text:
                 print("Empty response from Gemini")
-                return "Summary unavailable (empty response)."
+                return _unavailable("Gemini returned an empty response")
 
             if self._was_truncated(response):
                 print(
@@ -328,6 +399,9 @@ class YouTubeDigest:
 
         except Exception as e:
             print(f"Error generating summary: {e}")
+            if isinstance(e, errors.APIError) and e.code == 429:
+                # A 5s wait does not clear a per-minute or per-day limit.
+                return _unavailable(_failure_reason(e))
 
             # Simple retry with a longer wait
             try:
@@ -337,11 +411,11 @@ class YouTubeDigest:
                 return (
                     response.text.strip()
                     if response and response.text
-                    else "Summary unavailable."
+                    else _unavailable("Gemini returned an empty response")
                 )
             except Exception as retry_e:
                 print(f"Retry failed: {retry_e}")
-                return "Summary unavailable."
+                return _unavailable(_failure_reason(retry_e))
 
     @staticmethod
     def _was_truncated(response: types.GenerateContentResponse) -> bool:
@@ -386,9 +460,9 @@ class YouTubeDigest:
         summarized with a single Gemini request that returns a JSON object
         mapping video ID to summary, instead of one request per video. Any
         video whose summary could not be parsed out of a chunk's response
-        (e.g. truncation or malformed JSON) falls back to the slower but more
-        robust single-video summarize_description(), so no video is ever left
-        without a summary.
+        (e.g. truncation, malformed JSON, or an API error) falls back to the
+        slower single-video summarize_description(). After a model's daily
+        quota runs out, those calls skip it without a request.
 
         Args:
             videos: Mapping of video ID to its VideoDetail. Each detail's
@@ -686,12 +760,13 @@ class YouTubeDigest:
         html += "<h1>YouTube Daily Digest</h1>"
         html += f"<p>Date: {date_str} | Started: {start_str} | Completed: {end_str}</p>"
 
+        note_open = (
+            "<div style='margin: 15px 0; padding: 10px 15px; background-color: "
+            "#fff3cd; border: 1px solid #ffeeba; border-radius: 4px; font-size: "
+            "13px; color: #856404;'>"
+        )
         if skipped_channels:
-            html += (
-                "<div style='margin: 15px 0; padding: 10px 15px; background-color: "
-                "#fff3cd; border: 1px solid #ffeeba; border-radius: 4px; font-size: "
-                "13px; color: #856404;'>"
-            )
+            html += note_open
             html += (
                 f"<strong>Note:</strong> {len(skipped_channels)} channel(s) could "
                 "not be checked this run:"
@@ -699,6 +774,22 @@ class YouTubeDigest:
             html += "<ul style='margin: 5px 0 0 20px; padding: 0;'>"
             for reason in skipped_channels:
                 html += f"<li>{escape(reason)}</li>"
+            html += "</ul></div>"
+
+        failure_counts = Counter(
+            v.summary.removeprefix(f"{SUMMARY_UNAVAILABLE}: ")
+            for v in all_videos.values()
+            if v.summary and v.summary.startswith(SUMMARY_UNAVAILABLE)
+        )
+        if failure_counts:
+            html += note_open
+            html += (
+                f"<strong>Note:</strong> {failure_counts.total()} of {total_videos} "
+                "video(s) have no summary:"
+            )
+            html += "<ul style='margin: 5px 0 0 20px; padding: 0;'>"
+            for reason, count in failure_counts.items():
+                html += f"<li>{count} video(s): {escape(reason)}</li>"
             html += "</ul></div>"
 
         if total_videos == 0:

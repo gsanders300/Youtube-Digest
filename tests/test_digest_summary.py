@@ -31,6 +31,29 @@ def _make_digest() -> YouTubeDigest:
     return YouTubeDigest(youtube=MagicMock(), genai_client=MagicMock())
 
 
+def _quota_error(period: str) -> errors.ClientError:
+    """Builds a Gemini 429 like the free-tier quota errors, for PerDay or PerMinute."""
+    return errors.ClientError(
+        429,
+        {
+            "error": {
+                "code": 429,
+                "status": "RESOURCE_EXHAUSTED",
+                "details": [
+                    {
+                        "violations": [
+                            {
+                                "quotaId": f"GenerateRequests{period}"
+                                "PerProjectPerModel-FreeTier"
+                            }
+                        ]
+                    }
+                ],
+            }
+        },
+    )
+
+
 def _make_response(text: str, finish_reason: str = "STOP") -> MagicMock:
     """Builds a fake Gemini GenerateContentResponse for mocking."""
     response = MagicMock()
@@ -68,7 +91,7 @@ class TestSummarizeDescriptionHappyPath:
         with patch("time.sleep"):
             result = digest.summarize_description("Title: X\nDescription: Y")
 
-        assert result == "Summary unavailable (empty response)."
+        assert result == "Summary unavailable: Gemini returned an empty response."
 
 
 class TestSummarizeDescriptionTruncationRetry:
@@ -157,7 +180,37 @@ class TestSummarizeDescriptionExceptionHandling:
         with patch("time.sleep"):
             result = digest.summarize_description("Title: X\nDescription: Y")
 
-        assert result == "Summary unavailable."
+        assert result == "Summary unavailable: unexpected error (Exception)."
+
+    def test_rate_limit_is_not_retried_and_names_the_limit(self) -> None:
+        """A 429 skips the 5s retry, and the text names the per-minute limit."""
+        digest = _make_digest()
+        digest.genai_client.models.generate_content.side_effect = _quota_error(
+            "PerMinute"
+        )
+
+        with patch("time.sleep") as mock_sleep:
+            result = digest.summarize_description("Title: X\nDescription: Y")
+
+        assert result == (
+            "Summary unavailable: the Gemini free-tier per-minute request limit was hit."
+        )
+        # One call per model, and no second attempt.
+        assert digest.genai_client.models.generate_content.call_count == 2
+        assert 5 not in [c.args[0] for c in mock_sleep.call_args_list]
+
+    def test_daily_quota_stops_calls_to_that_model(self) -> None:
+        """A per-day 429 on both models means no more Gemini calls this run."""
+        digest = _make_digest()
+        digest.genai_client.models.generate_content.side_effect = _quota_error("PerDay")
+
+        with patch("time.sleep"):
+            first = digest.summarize_description("Title: X\nDescription: Y")
+            second = digest.summarize_description("Title: Z\nDescription: W")
+
+        assert "daily request limit is used up" in first
+        assert second == first
+        assert digest.genai_client.models.generate_content.call_count == 2
 
 
 class TestWasTruncatedHelper:
@@ -293,7 +346,9 @@ class TestModelFallback:
         digest.genai_client.models.generate_content.side_effect = Exception("boom")
 
         with patch("time.sleep"):
-            assert digest.summarize_description("Title: x") == "Summary unavailable."
+            assert digest.summarize_description("Title: x") == (
+                "Summary unavailable: unexpected error (Exception)."
+            )
 
         calls = digest.genai_client.models.generate_content.call_args_list
         assert GEMINI_FALLBACK_MODEL not in [c.kwargs["model"] for c in calls]

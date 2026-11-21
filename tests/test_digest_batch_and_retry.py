@@ -113,6 +113,45 @@ class TestSummarizeDescriptionsBatchOrchestration:
         assert first_chunk_size == GEMINI_BATCH_SIZE
         assert second_chunk_size == 1
 
+    def test_daily_quota_marks_videos_unavailable_without_more_requests(
+        self,
+    ) -> None:
+        """Regression (Nov 20, 2026 run): a spent daily quota stops all requests.
+
+        Both models return a per-day 429. Before the fix, each video in the
+        per-video fallback made up to 4 more requests that could not succeed.
+        """
+        digest = _make_digest()
+        videos = _make_videos(GEMINI_BATCH_SIZE + 1)
+        digest.genai_client.models.generate_content.side_effect = errors.ClientError(
+            429,
+            {
+                "error": {
+                    "code": 429,
+                    "status": "RESOURCE_EXHAUSTED",
+                    "details": [
+                        {
+                            "violations": [
+                                {
+                                    "quotaId": "GenerateRequestsPerDay"
+                                    "PerProjectPerModel-FreeTier"
+                                }
+                            ]
+                        }
+                    ],
+                }
+            },
+        )
+
+        with patch("time.sleep"):
+            digest.summarize_descriptions_batch(videos)
+
+        # One call per model for the first batch; the second batch makes none.
+        assert digest.genai_client.models.generate_content.call_count == 2
+        for detail in videos.values():
+            assert detail.summary.startswith("Summary unavailable: ")
+            assert "daily request limit is used up" in detail.summary
+
 
 class TestSummarizeBatchViaGemini:
     """Tests for the raw Gemini batch-call + JSON parsing logic."""

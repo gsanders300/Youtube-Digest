@@ -223,6 +223,37 @@ class TestRunSkippedChannelReporting:
 
         html, _subject = digest.send_email.call_args.args
         assert "could not be checked" not in html
+        assert "have no summary" not in html
+
+    def test_missing_summaries_are_counted_with_their_reason(self) -> None:
+        """Videos without a summary get a note with the count and the cause."""
+        digest = _make_digest()
+        digest.get_recent_videos = MagicMock(
+            side_effect=[
+                [_video_item("vid1", "Channel A")],
+                [_video_item("vid2", "Channel B")],
+            ]
+        )
+        digest.get_video_details = MagicMock(
+            side_effect=[
+                {"vid1": _video_detail("vid1", "Video One")},
+                {"vid2": _video_detail("vid2", "Video Two")},
+            ]
+        )
+
+        def summarize(videos: dict[str, VideoDetail]) -> None:
+            videos["vid1"].summary = "A real summary."
+            videos["vid2"].summary = "Summary unavailable: Gemini was overloaded (503)."
+
+        digest.summarize_descriptions_batch = MagicMock(side_effect=summarize)
+        digest.send_email = MagicMock()
+
+        with patch("builtins.open", mock_open(read_data=CHANNELS_YML)):
+            digest.run()
+
+        html, _subject = digest.send_email.call_args.args
+        assert "1 of 2 video(s) have no summary" in html
+        assert "<li>1 video(s): Gemini was overloaded (503).</li>" in html
 
 
 class TestRunBatchSummarizationWiring:
