@@ -110,7 +110,7 @@ The digest makes summaries in batches, not one video at a time.
 1. `YouTubeDigest.run` collects all new videos from all channels first.
 2. It calls `summarize_descriptions_batch`. That function puts the videos into groups of `GEMINI_BATCH_SIZE`. For each group, it asks the model (Claude, then Gemini; see section 11) for one JSON object that maps each video ID to its summary. After a Gemini server error (5xx), it waits `GEMINI_BATCH_RETRY_DELAY_SECONDS` and tries the group once more.
 3. If a video is missing from the parsed response, or the request for the group fails, the digest calls `summarize_description` for that one video.
-4. After Gemini returns a per-day 429, `_generate_content` does not call it again in the run (`exhausted_models`). Later calls then show the Claude error that left the video without a summary. `summarize_description` does not retry a 429. Without this, the per-video calls in step 3 use up the free-tier quota and then keep failing. On November 20, 2026, the 429 errors gave a free-tier limit of 20 requests per day and 5 per minute for each of `gemini-4-hydrogen` and `gemini-3.8-flash`. Before you change `GEMINI_MODEL`, make sure that its daily limit allows a day of per-video calls.
+4. After Gemini returns a per-day 429, `_generate_content` does not call it again in the run (`exhausted_models`). Later calls then show the Claude error that left the video without a summary. `summarize_description` does not retry a 429. Without this, the per-video calls in step 3 use up the free-tier quota and then keep failing. Gemini's free tier is small: on November 20, 2026, its 429 errors gave a limit of 20 requests per day and 5 per minute for each model. Before you change `GEMINI_MODEL`, make sure that its daily limit allows a day of per-video calls.
 5. A video that gets no summary shows `Summary unavailable: <reason>.` (`_failure_reason`). The email shows a note at the top with the number of these videos and the reasons.
 6. Above the notes, the email shows a **Run status** box: the problems, every retry and its cause (`self.retries` for the summary models, `youtube_api.retries_by_status` for the YouTube API), and the number of videos that each model summarized (`self.answered_by`). If you add a retry or a fallback, record it in `self.retries`. If there is a problem, the subject ends in `[problems]`.
 
@@ -193,7 +193,7 @@ Every module, class, and function must have a docstring. Use triple double quote
 ## 6. Test strategy
 
 - Write tests for the logic in `digest.py` and in the utility scripts.
-- Mock all external calls (YouTube, Gemini, SMTP). Use `unittest.mock` or `pytest-mock`.
+- Mock all external calls (YouTube, Claude, Gemini, SMTP). Use `unittest.mock` or `pytest-mock`.
 - A test must give the same result each time. A test must not need a real API key or a network connection.
 - Put all tests in the `tests/` folder.
 
@@ -222,6 +222,8 @@ The project has these workflows in `.github/workflows/`:
 | `dependabot-watch.yml` | Dependabot watch | None (daily `schedule:`) |
 
 `private-digest.yml` is the reusable workflow that the owner's private repository calls for all four digest workflows (README section 5.2). It runs the latest release, never `main`, and runs the tests first. The private repository calls it from `main`, so a change to it goes live at the next run with no release and no tests: keep its inputs and secret names stable, and keep its issue texts in step with the four digest workflows here.
+
+To add a secret, push it to `private-digest.yml` first, with `required: false`. Then add it to the private repository's secrets and to its caller's `secrets:` block. GitHub fails a run whose caller passes a secret that the called workflow does not declare, so the other order breaks the digest until both changes are in. If the code requires the new secret, a run between the two pushes fails, so make them one after the other.
 
 The four digest workflows start only with `workflow_dispatch`. Do not give them a `schedule:` trigger. Their job skips in `gsanders300/Youtube-Digest`, which has no secrets, and runs in forks. The only scheduled workflow is `dependabot-watch.yml`. `tests.yml` runs `pytest` with `--locked` on each push to `main` and on each pull request, so a stale `uv.lock` fails it. It has read-only permissions and uses no secrets. The README shows its status badge. `release.yml` makes a release on each push to `main` without waiting for Tests, so a stale lock pushed directly to `main` is still released. The private workflow runs the tests before it runs a script.
 
