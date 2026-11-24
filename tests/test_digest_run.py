@@ -16,9 +16,10 @@ import pytest
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from google.genai import errors
+import anthropic
+import httpx2
 
-from digest import GEMINI_FALLBACK_MODEL, GEMINI_MODEL, VideoDetail, YouTubeDigest, main
+from digest import CLAUDE_MODEL, GEMINI_MODEL, VideoDetail, YouTubeDigest, main
 from youtube_api import ResolvedChannel
 
 
@@ -46,7 +47,9 @@ def _portable_datetime_for_windows():
 
 def _make_digest() -> YouTubeDigest:
     """Builds a YouTubeDigest instance without hitting any real APIs."""
-    return YouTubeDigest(youtube=MagicMock(), genai_client=MagicMock())
+    return YouTubeDigest(
+        youtube=MagicMock(), genai_client=MagicMock(), anthropic_client=MagicMock()
+    )
 
 
 CHANNELS_YML = """
@@ -262,7 +265,7 @@ class TestRunStatus:
     """Tests for the run status block: problems, retries, and answering models."""
 
     def test_fallback_answer_reports_retry_cause_and_model(self) -> None:
-        """A 503 on the primary model shows as a retry, and the fallback is named."""
+        """A 529 from Claude shows as a retry, and the Gemini fallback is named."""
         digest = _make_digest()
         digest.get_recent_videos = MagicMock(
             side_effect=[[_video_item("vid1", "Channel A")], []]
@@ -270,11 +273,12 @@ class TestRunStatus:
         digest.get_video_details = MagicMock(
             return_value={"vid1": _video_detail("vid1", "Video One")}
         )
+        request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+        digest.anthropic_client.messages.create.side_effect = anthropic.APIStatusError(
+            "overloaded", response=httpx2.Response(529, request=request), body=None
+        )
         answer = MagicMock(text='{"vid1": "Isn’t “this” great 🚀."}', candidates=[])
-        digest.genai_client.models.generate_content.side_effect = [
-            errors.ServerError(503, {"error": {"message": "overloaded"}}),
-            answer,
-        ]
+        digest.genai_client.models.generate_content.return_value = answer
         digest.send_email = MagicMock()
 
         with (
@@ -286,12 +290,38 @@ class TestRunStatus:
         html, subject = digest.send_email.call_args.args
         assert "<strong>Problems:</strong> None" in html
         assert (
-            f"1x Gemini: {GEMINI_FALLBACK_MODEL} took over after {GEMINI_MODEL} "
-            "failed: Gemini was overloaded (503)"
+            f"1x Summaries: {GEMINI_MODEL} took over after {CLAUDE_MODEL} "
+            "failed: Claude was overloaded (529)"
         ) in html
-        assert f"{GEMINI_FALLBACK_MODEL}: 1 video(s)" in html
+        assert f"{GEMINI_MODEL}: 1 video(s)" in html
         assert "Isn’t “this” great 🚀." in html
         assert "[problems]" not in subject
+
+    def test_claude_answer_is_named_with_no_retries(self) -> None:
+        """When Claude answers, the run status names it and shows no retries."""
+        digest = _make_digest()
+        digest.get_recent_videos = MagicMock(
+            side_effect=[[_video_item("vid1", "Channel A")], []]
+        )
+        digest.get_video_details = MagicMock(
+            return_value={"vid1": _video_detail("vid1", "Video One")}
+        )
+        text_block = MagicMock(type="text", text='{"vid1": "A summary."}')
+        digest.anthropic_client.messages.create.return_value = MagicMock(
+            content=[text_block], stop_reason="end_turn"
+        )
+        digest.send_email = MagicMock()
+
+        with (
+            patch("builtins.open", mock_open(read_data=CHANNELS_YML)),
+            patch("time.sleep"),
+        ):
+            digest.run()
+
+        html, _subject = digest.send_email.call_args.args
+        assert "<strong>Retries:</strong> None" in html
+        assert f"{CLAUDE_MODEL}: 1 video(s)" in html
+        digest.genai_client.models.generate_content.assert_not_called()
 
     def test_skipped_channel_names_cause_and_flags_subject(self) -> None:
         """A failed channel fetch shows its HTTP cause, and the subject is flagged."""
@@ -466,6 +496,7 @@ class TestMain:
 
     SECRETS = (
         "YOUTUBE_API_KEY",
+        "ANTHROPIC_API_KEY",
         "GEMINI_API_KEY",
         "GMAIL_USER",
         "GMAIL_APP_PASSWORD",

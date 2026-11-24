@@ -76,7 +76,9 @@ class TestGetRecentVideosWindow:
     """Tests that get_recent_videos() filters by the run's cutoff."""
 
     def _fetch(self, items: list[dict]) -> list[str]:
-        digest = YouTubeDigest(youtube=MagicMock(), genai_client=MagicMock())
+        digest = YouTubeDigest(
+            youtube=MagicMock(), genai_client=MagicMock(), anthropic_client=MagicMock()
+        )
         with patch("digest.execute", return_value={"items": items}):
             videos = digest.get_recent_videos("UU001")
         return [v["contentDetails"]["videoId"] for v in videos]

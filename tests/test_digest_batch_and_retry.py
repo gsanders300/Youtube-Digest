@@ -1,4 +1,4 @@
-"""Tests for batched Gemini summarization."""
+"""Tests for batched summarization."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from unittest.mock import MagicMock, patch
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import anthropic
+import httpx2
 from google.genai import errors
 
 from digest import (
@@ -22,9 +24,25 @@ from digest import (
 def _make_digest() -> YouTubeDigest:
     """Builds a YouTubeDigest instance without hitting any real APIs.
 
-    Injects MagicMocks for both the YouTube client and the Gemini client.
+    Injects MagicMocks for the YouTube, Gemini, and Claude clients.
     """
-    return YouTubeDigest(youtube=MagicMock(), genai_client=MagicMock())
+    return YouTubeDigest(
+        youtube=MagicMock(), genai_client=MagicMock(), anthropic_client=MagicMock()
+    )
+
+
+def _make_claude_response(text: str, stop_reason: str = "end_turn") -> MagicMock:
+    """Builds a fake Claude Message with one text block."""
+    return MagicMock(
+        content=[MagicMock(type="text", text=text)], stop_reason=stop_reason
+    )
+
+
+def _claude_overloaded() -> anthropic.APIStatusError:
+    """Builds a Claude 529 (overloaded) API error."""
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx2.Response(529, request=request)
+    return anthropic.APIStatusError("overloaded", response=response, body=None)
 
 
 def _make_gemini_response(text: str, finish_reason: str = "STOP") -> MagicMock:
@@ -116,13 +134,15 @@ class TestSummarizeDescriptionsBatchOrchestration:
     def test_daily_quota_marks_videos_unavailable_without_more_requests(
         self,
     ) -> None:
-        """Regression (Nov 20, 2026 run): a spent daily quota stops all requests.
+        """Regression (Nov 20, 2026 run): a spent daily quota stops Gemini requests.
 
-        Both models return a per-day 429. Before the fix, each video in the
-        per-video fallback made up to 4 more requests that could not succeed.
+        Claude fails and Gemini returns a per-day 429. Before the fix, each
+        video in the per-video fallback made more Gemini requests that could
+        not succeed.
         """
         digest = _make_digest()
         videos = _make_videos(GEMINI_BATCH_SIZE + 1)
+        digest.anthropic_client.messages.create.side_effect = _claude_overloaded()
         digest.genai_client.models.generate_content.side_effect = errors.ClientError(
             429,
             {
@@ -146,22 +166,21 @@ class TestSummarizeDescriptionsBatchOrchestration:
         with patch("time.sleep"):
             digest.summarize_descriptions_batch(videos)
 
-        # One call per model for the first batch; the second batch makes none.
-        assert digest.genai_client.models.generate_content.call_count == 2
+        # One Gemini call for the first batch; nothing after it calls Gemini.
+        assert digest.genai_client.models.generate_content.call_count == 1
         for detail in videos.values():
-            assert detail.summary.startswith("Summary unavailable: ")
-            assert "daily request limit is used up" in detail.summary
+            assert detail.summary == "Summary unavailable: Claude was overloaded (529)."
 
 
 class TestSummarizeBatchViaGemini:
-    """Tests for the raw Gemini batch-call + JSON parsing logic."""
+    """Tests for the raw batch call + JSON parsing logic."""
 
     def test_valid_json_response_returns_all_summaries(self) -> None:
         """A well-formed JSON response should be parsed into a summary dict."""
         digest = _make_digest()
         batch = _make_videos(2)
-        digest.genai_client.models.generate_content.return_value = (
-            _make_gemini_response('{"vid0": "Summary zero.", "vid1": "Summary one."}')
+        digest.anthropic_client.messages.create.return_value = _make_claude_response(
+            '{"vid0": "Summary zero.", "vid1": "Summary one."}'
         )
 
         with patch("time.sleep"):
@@ -173,8 +192,8 @@ class TestSummarizeBatchViaGemini:
         """A response wrapped in markdown code fences should still parse."""
         digest = _make_digest()
         batch = _make_videos(1)
-        digest.genai_client.models.generate_content.return_value = (
-            _make_gemini_response('```json\n{"vid0": "Summary zero."}\n```')
+        digest.anthropic_client.messages.create.return_value = _make_claude_response(
+            '```json\n{"vid0": "Summary zero."}\n```'
         )
 
         with patch("time.sleep"):
@@ -186,8 +205,8 @@ class TestSummarizeBatchViaGemini:
         """Non-JSON text should result in an empty dict (triggers fallback)."""
         digest = _make_digest()
         batch = _make_videos(1)
-        digest.genai_client.models.generate_content.return_value = (
-            _make_gemini_response("this is not json", finish_reason="STOP")
+        digest.anthropic_client.messages.create.return_value = _make_claude_response(
+            "this is not json"
         )
 
         with patch("time.sleep"):
@@ -196,26 +215,27 @@ class TestSummarizeBatchViaGemini:
         assert result == {}
 
     def test_truncated_invalid_json_returns_empty_dict(self) -> None:
-        """A MAX_TOKENS-truncated (and therefore invalid) response returns {}."""
+        """A max_tokens-truncated (and therefore invalid) response returns {}."""
         digest = _make_digest()
         batch = _make_videos(1)
-        digest.genai_client.models.generate_content.return_value = (
-            _make_gemini_response(
-                '{"vid0": "Summary that got cut off mid', finish_reason="MAX_TOKENS"
-            )
+        digest.anthropic_client.messages.create.return_value = _make_claude_response(
+            '{"vid0": "Summary that got cut off mid', stop_reason="max_tokens"
         )
 
         with patch("time.sleep"):
             result = digest._summarize_batch_via_gemini(batch)
 
         assert result == {}
+        assert digest.retries == {
+            "batch failed (reply cut off (MAX_TOKENS)); video re-asked alone": 1
+        }
 
     def test_non_dict_json_returns_empty_dict(self) -> None:
         """Valid JSON that isn't an object (e.g. a list) should be rejected."""
         digest = _make_digest()
         batch = _make_videos(1)
-        digest.genai_client.models.generate_content.return_value = (
-            _make_gemini_response('["not", "a", "dict"]')
+        digest.anthropic_client.messages.create.return_value = _make_claude_response(
+            '["not", "a", "dict"]'
         )
 
         with patch("time.sleep"):
@@ -227,9 +247,7 @@ class TestSummarizeBatchViaGemini:
         """An empty response should return {} rather than raise."""
         digest = _make_digest()
         batch = _make_videos(1)
-        digest.genai_client.models.generate_content.return_value = (
-            _make_gemini_response("")
-        )
+        digest.anthropic_client.messages.create.return_value = _make_claude_response("")
 
         with patch("time.sleep"):
             result = digest._summarize_batch_via_gemini(batch)
@@ -240,7 +258,7 @@ class TestSummarizeBatchViaGemini:
         """An API exception should be caught and return {} rather than raise."""
         digest = _make_digest()
         batch = _make_videos(1)
-        digest.genai_client.models.generate_content.side_effect = Exception("boom")
+        digest.anthropic_client.messages.create.side_effect = Exception("boom")
 
         with patch("time.sleep"):
             result = digest._summarize_batch_via_gemini(batch)
@@ -248,12 +266,12 @@ class TestSummarizeBatchViaGemini:
         assert result == {}
 
     def test_server_error_retries_batch_once(self) -> None:
-        """A server error on both models gets one batch retry after a delay."""
+        """A Claude failure, then a Gemini server error, gets one batch retry."""
         digest = _make_digest()
+        digest.anthropic_client.messages.create.side_effect = _claude_overloaded()
         batch = _make_videos(2)
         digest.genai_client.models.generate_content.side_effect = [
             errors.ServerError(503, {"error": {"message": "overloaded"}}),
-            errors.ServerError(504, {"error": {"message": "deadline"}}),
             _make_gemini_response('{"vid0": "Summary zero.", "vid1": "Summary one."}'),
         ]
 
@@ -267,6 +285,7 @@ class TestSummarizeBatchViaGemini:
         """If the retry also fails, the batch returns {} for per-video fallback."""
         digest = _make_digest()
         batch = _make_videos(1)
+        digest.anthropic_client.messages.create.side_effect = _claude_overloaded()
         digest.genai_client.models.generate_content.side_effect = errors.ServerError(
             503, {"error": {"message": "overloaded"}}
         )
@@ -275,13 +294,15 @@ class TestSummarizeBatchViaGemini:
             result = digest._summarize_batch_via_gemini(batch)
 
         assert result == {}
-        # Two models on the first try, two on the retry.
-        assert digest.genai_client.models.generate_content.call_count == 4
+        # Both models on the first try, both on the retry.
+        assert digest.anthropic_client.messages.create.call_count == 2
+        assert digest.genai_client.models.generate_content.call_count == 2
 
     def test_client_error_is_not_retried(self) -> None:
         """A client error such as a 429 falls through without a batch retry."""
         digest = _make_digest()
         batch = _make_videos(1)
+        digest.anthropic_client.messages.create.side_effect = _claude_overloaded()
         digest.genai_client.models.generate_content.side_effect = errors.ClientError(
             429, {"error": {"message": "quota"}}
         )
@@ -290,7 +311,7 @@ class TestSummarizeBatchViaGemini:
             result = digest._summarize_batch_via_gemini(batch)
 
         assert result == {}
-        assert digest.genai_client.models.generate_content.call_count == 2
+        assert digest.genai_client.models.generate_content.call_count == 1
 
 
 class TestStripJsonFences:

@@ -11,6 +11,7 @@ from email.mime.text import MIMEText
 from html import escape
 from typing import Any
 
+import anthropic
 import googleapiclient.discovery
 import httpx2
 import isodate
@@ -24,28 +25,45 @@ import environment
 import youtube_api
 from youtube_api import error_reason, execute, is_playlist_not_found, resolve_channel
 
-# --- Gemini generation tuning -----------------------------------------------
+# --- Summary model tuning ---------------------------------------------------
 # Centralized here so tuning affects both the batched and single-video
 # summarization paths consistently.
-GEMINI_MODEL = "gemini-3.5-flash-lite"
-# Used when GEMINI_MODEL returns an API error or times out.
-GEMINI_FALLBACK_MODEL = "gemini-3.8-flash"
+CLAUDE_MODEL = "claude-haiku-5-5"
+CLAUDE_EFFORT = "high"
+# Haiku 5.5 thinks before it answers, and its thinking counts against
+# max_tokens, so each request adds this room on top of the output budget.
+CLAUDE_THINKING_TOKENS = 12000
 # Per-request limit, so an overloaded model that never answers fails over
 # instead of stalling the run.
+CLAUDE_TIMEOUT_SECONDS = 120
+# Used when CLAUDE_MODEL returns an API error, times out, or refuses.
+GEMINI_MODEL = "gemini-3.5-flash-lite"
 GEMINI_TIMEOUT_SECONDS = 60
 GEMINI_TEMPERATURE = 0.7
+# Output budgets for both models. Claude also gets CLAUDE_THINKING_TOKENS.
 GEMINI_MAX_OUTPUT_TOKENS = 1024
 GEMINI_BATCH_MAX_OUTPUT_TOKENS = 4096
-GEMINI_BATCH_SIZE = 12  # Videos summarized per batched Gemini call.
+GEMINI_BATCH_SIZE = 12  # Videos summarized per batched call.
 # Wait before retrying a batch after a server error, so an overloaded model
 # gets one more try before the batch splits into one call per video.
 GEMINI_BATCH_RETRY_DELAY_SECONDS = 10
-DESCRIPTION_CHAR_LIMIT = 6000  # Max description chars sent to Gemini per video.
-# Start of the text shown in place of a summary that Gemini could not write.
+DESCRIPTION_CHAR_LIMIT = 6000  # Max description chars sent to the model per video.
+# Start of the text shown in place of a summary that no model could write.
 SUMMARY_UNAVAILABLE = "Summary unavailable"
 
 # How far back to look for "new" videos when DIGEST_SINCE is not set.
 LOOKBACK_HOURS = 24
+
+
+class ClaudeRefusalError(Exception):
+    """Raised when Claude ends a reply with stop_reason "refusal"."""
+
+
+class Generation(BaseModel):
+    """A model's reply text, and whether the output token limit cut it off."""
+
+    text: str
+    truncated: bool
 
 
 def _is_daily_quota_error(error: Exception) -> bool:
@@ -65,14 +83,26 @@ def _is_daily_quota_error(error: Exception) -> bool:
 
 
 def _failure_reason(error: Exception) -> str:
-    """Describes a failed Gemini call in a short phrase for the email.
+    """Describes a failed Claude or Gemini call in a short phrase for the email.
 
     Args:
-        error: The exception raised by the last Gemini call.
+        error: The exception raised by the last model call.
 
     Returns:
         A phrase that names the cause, for example the daily quota.
     """
+    if isinstance(error, ClaudeRefusalError):
+        return "Claude declined to summarize it"
+    if isinstance(error, anthropic.APITimeoutError):
+        return f"Claude did not answer within {CLAUDE_TIMEOUT_SECONDS} seconds"
+    if isinstance(error, anthropic.APIConnectionError):
+        return "could not connect to Claude"
+    if isinstance(error, anthropic.APIStatusError):
+        if error.status_code == 429:
+            return "the Claude rate limit was hit"
+        if error.status_code == 529:
+            return "Claude was overloaded (529)"
+        return f"Claude returned error {error.status_code}"
     if _is_daily_quota_error(error):
         return "the Gemini free-tier daily request limit is used up"
     if isinstance(error, httpx2.TimeoutException):
@@ -161,12 +191,18 @@ def _publish_sort_key(video: VideoDetail) -> datetime.datetime:
 class YouTubeDigest:
     """Service for generating and sending a daily YouTube video digest."""
 
-    def __init__(self, youtube: Any = None, genai_client: Any = None) -> None:
+    def __init__(
+        self,
+        youtube: Any = None,
+        genai_client: Any = None,
+        anthropic_client: Any = None,
+    ) -> None:
         """Initializes the YouTubeDigest service with API clients.
 
         Args:
             youtube: A YouTube Data API v3 client; built from YOUTUBE_API_KEY if None.
             genai_client: A Gemini client; built from GEMINI_API_KEY if None.
+            anthropic_client: A Claude client; built from ANTHROPIC_API_KEY if None.
         """
         self.youtube = youtube or googleapiclient.discovery.build(
             "youtube", "v3", developerKey=environment.youtube_api_key()
@@ -175,6 +211,13 @@ class YouTubeDigest:
             api_key=environment.gemini_api_key(),
             http_options=types.HttpOptions(timeout=GEMINI_TIMEOUT_SECONDS * 1000),
         )
+        # No SDK retries: a failed call fails over to Gemini at once, and every
+        # retry shows in the email's run status.
+        self.anthropic_client = anthropic_client or anthropic.Anthropic(
+            api_key=environment.anthropic_api_key(),
+            timeout=CLAUDE_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
         # Fixed once per run so every channel uses the same window.
         self.cutoff = lookback_cutoff(
             datetime.datetime.now(ZoneInfo("America/New_York"))
@@ -182,7 +225,7 @@ class YouTubeDigest:
         # Models whose daily quota is used up, with the 429 they returned.
         # They are not called again this run.
         self.exhausted_models: dict[str, errors.APIError] = {}
-        # For the email's run status: every Gemini retry by cause, the model
+        # For the email's run status: every model retry by cause, the model
         # that answered the last successful call, and each video's model.
         self.retries: Counter[str] = Counter()
         self.last_model: str | None = None
@@ -299,52 +342,120 @@ class YouTubeDigest:
         return details
 
     def _generate_content(
-        self, prompt: str, config: types.GenerateContentConfig
-    ) -> types.GenerateContentResponse:
-        """Calls GEMINI_MODEL, then GEMINI_FALLBACK_MODEL on an API error or timeout.
+        self, prompt: str, max_output_tokens: int, json_output: bool = False
+    ) -> Generation:
+        """Calls CLAUDE_MODEL, then GEMINI_MODEL on an API error, timeout, or refusal.
 
-        Skips a model whose daily quota ran out earlier in this run.
+        Skips Gemini after its daily quota ran out earlier in this run.
 
         Args:
             prompt: The prompt text to send.
-            config: The generation config to use for both models.
+            max_output_tokens: The output budget for the reply text.
+            json_output: Whether to ask Gemini for a JSON reply. The prompt asks
+                Claude for the format.
 
         Returns:
-            The response from whichever model answered first.
+            The reply from whichever model answered first.
 
         Raises:
-            errors.APIError: If the last model tried returns an API error, or
-                both models' daily quotas are used up.
-            httpx2.TimeoutException: If the last model tried times out.
+            anthropic.APIError: If Claude fails and Gemini is skipped.
+            ClaudeRefusalError: If Claude refuses and Gemini is skipped.
+            errors.APIError: If Gemini returns an API error.
+            httpx2.TimeoutException: If Gemini times out.
         """
         error: Exception | None = None
-        for model in (GEMINI_MODEL, GEMINI_FALLBACK_MODEL):
+        for model in (CLAUDE_MODEL, GEMINI_MODEL):
             if model in self.exhausted_models:
-                error = self.exhausted_models[model]
+                # Keep the earlier model's error: it says why this call failed.
+                error = error or self.exhausted_models[model]
                 continue
             if error is not None:
                 print(f"  Trying {model}...")
                 self.retries[
-                    f"{model} took over after {GEMINI_MODEL} failed: {_failure_reason(error)}"
+                    f"{model} took over after {CLAUDE_MODEL} failed: {_failure_reason(error)}"
                 ] += 1
             try:
-                response = self.genai_client.models.generate_content(
-                    model=model, contents=prompt, config=config
-                )
-            except (errors.APIError, httpx2.TimeoutException) as e:
+                if model == CLAUDE_MODEL:
+                    generation = self._call_claude(prompt, max_output_tokens)
+                else:
+                    generation = self._call_gemini(
+                        prompt, max_output_tokens, json_output
+                    )
+            except (
+                anthropic.APIError,
+                ClaudeRefusalError,
+                errors.APIError,
+                httpx2.TimeoutException,
+            ) as e:
                 print(f"  {model} failed ({e!r})")
                 if _is_daily_quota_error(e):
                     self.exhausted_models[model] = e
                 error = e
                 continue
-            if model != GEMINI_MODEL:
+            if model != CLAUDE_MODEL:
                 print(f"  {model} answered.")
             self.last_model = model
-            return response
+            return generation
         raise error
 
+    def _call_claude(self, prompt: str, max_output_tokens: int) -> Generation:
+        """Sends one prompt to CLAUDE_MODEL at CLAUDE_EFFORT.
+
+        Args:
+            prompt: The prompt text to send.
+            max_output_tokens: The output budget for the reply text. The request
+                adds CLAUDE_THINKING_TOKENS for the model's thinking.
+
+        Returns:
+            The reply text, and whether max_tokens cut it off.
+
+        Raises:
+            anthropic.APIError: If the request fails or times out.
+            ClaudeRefusalError: If Claude refuses to answer.
+        """
+        response = self.anthropic_client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=max_output_tokens + CLAUDE_THINKING_TOKENS,
+            output_config={"effort": CLAUDE_EFFORT},
+            messages=[{"role": "user", "content": prompt}],
+        )
+        if response.stop_reason == "refusal":
+            raise ClaudeRefusalError(str(response.stop_details))
+        text = "".join(block.text for block in response.content if block.type == "text")
+        return Generation(text=text, truncated=response.stop_reason == "max_tokens")
+
+    def _call_gemini(
+        self, prompt: str, max_output_tokens: int, json_output: bool
+    ) -> Generation:
+        """Sends one prompt to GEMINI_MODEL.
+
+        Args:
+            prompt: The prompt text to send.
+            max_output_tokens: The output token limit.
+            json_output: Whether to ask for a JSON reply.
+
+        Returns:
+            The reply text, and whether the token limit cut it off.
+
+        Raises:
+            errors.APIError: If the request fails.
+            httpx2.TimeoutException: If the request times out.
+        """
+        config = types.GenerateContentConfig(
+            max_output_tokens=max_output_tokens,
+            temperature=GEMINI_TEMPERATURE,
+            response_mime_type="application/json" if json_output else None,
+        )
+        response = self.genai_client.models.generate_content(
+            model=GEMINI_MODEL, contents=prompt, config=config
+        )
+        return Generation(
+            text=(response.text or "") if response else "",
+            truncated=self._was_truncated(response),
+        )
+
     def summarize_description(self, text_to_summarize: str) -> str:
-        """Generates a 2-3 sentence summary of the video content using Gemini.
+        """Generates a 2-3 sentence summary of the video content with one model call.
 
         Repairs any response that is still cut off mid-sentence by retrying
         once with a larger budget and, failing that, trimming back to the last
@@ -368,22 +479,14 @@ class YouTubeDigest:
             f"{text_to_summarize[:DESCRIPTION_CHAR_LIMIT]}"
         )
 
-        # Define generation config inside the call or as a separate object
-        gen_config = types.GenerateContentConfig(
-            max_output_tokens=GEMINI_MAX_OUTPUT_TOKENS,
-            temperature=GEMINI_TEMPERATURE,
-        )
-
         try:
-            # We move the system instruction into the prompt or the config if supported by this SDK version
-            # Using a slightly safer approach for the prompt structure
-            response = self._generate_content(prompt, gen_config)
+            response = self._generate_content(prompt, GEMINI_MAX_OUTPUT_TOKENS)
 
-            if not response or not response.text:
-                print("Empty response from Gemini")
-                return _unavailable("Gemini returned an empty response")
+            if not response.text:
+                print("Empty summary response")
+                return _unavailable("the model returned an empty response")
 
-            if self._was_truncated(response):
+            if response.truncated:
                 print(
                     "  Warning: summary was truncated (MAX_TOKENS); retrying with a "
                     "larger token budget..."
@@ -391,17 +494,15 @@ class YouTubeDigest:
                 self.retries[
                     "summary cut off (MAX_TOKENS); re-asked with a larger budget"
                 ] += 1
-                retry_config = types.GenerateContentConfig(
-                    max_output_tokens=gen_config.max_output_tokens * 2,
-                    temperature=gen_config.temperature,
+                retry_response = self._generate_content(
+                    prompt, GEMINI_MAX_OUTPUT_TOKENS * 2
                 )
-                retry_response = self._generate_content(prompt, retry_config)
-                if retry_response and retry_response.text:
+                if retry_response.text:
                     response = retry_response
 
             summary = response.text.strip()
 
-            if self._was_truncated(response):
+            if response.truncated:
                 print(
                     "  Warning: summary still truncated after retry; trimming to "
                     "the last complete sentence."
@@ -421,11 +522,11 @@ class YouTubeDigest:
                 print("Retrying with 5s delay...")
                 self.retries[f"one video re-asked after {_failure_reason(e)}"] += 1
                 time.sleep(5)
-                response = self._generate_content(prompt, gen_config)
+                response = self._generate_content(prompt, GEMINI_MAX_OUTPUT_TOKENS)
                 return (
                     response.text.strip()
-                    if response and response.text
-                    else _unavailable("Gemini returned an empty response")
+                    if response.text
+                    else _unavailable("the model returned an empty response")
                 )
             except Exception as retry_e:
                 print(f"Retry failed: {retry_e}")
@@ -468,10 +569,10 @@ class YouTubeDigest:
         return text[: last_terminator + 1].strip()
 
     def summarize_descriptions_batch(self, videos: dict[str, VideoDetail]) -> None:
-        """Summarizes many videos using as few Gemini calls as possible.
+        """Summarizes many videos using as few model calls as possible.
 
         Videos are grouped into chunks of GEMINI_BATCH_SIZE and each chunk is
-        summarized with a single Gemini request that returns a JSON object
+        summarized with a single model request that returns a JSON object
         mapping video ID to summary, instead of one request per video. Any
         video whose summary could not be parsed out of a chunk's response
         (e.g. truncation, malformed JSON, or an API error) falls back to the
@@ -514,7 +615,7 @@ class YouTubeDigest:
     def _summarize_batch_via_gemini(
         self, batch: dict[str, VideoDetail]
     ) -> dict[str, str]:
-        """Sends one Gemini request to summarize multiple videos at once.
+        """Sends one model request to summarize multiple videos at once.
 
         After a Gemini server error (5xx), waits GEMINI_BATCH_RETRY_DELAY_SECONDS
         and retries the request once.
@@ -523,7 +624,7 @@ class YouTubeDigest:
             batch: Mapping of video ID to VideoDetail for a single chunk.
 
         Returns:
-            A mapping of video ID to summary for every video Gemini returned
+            A mapping of video ID to summary for every video the model returned
             a usable entry for. Entries that are missing, invalid, or could
             not be parsed are simply absent so the caller can fall back to
             summarize_description() for just those videos.
@@ -552,16 +653,12 @@ class YouTubeDigest:
             f"{videos_block}"
         )
 
-        gen_config = types.GenerateContentConfig(
-            max_output_tokens=GEMINI_BATCH_MAX_OUTPUT_TOKENS,
-            temperature=GEMINI_TEMPERATURE,
-            response_mime_type="application/json",
-        )
-
         response = None
         try:
             try:
-                response = self._generate_content(prompt, gen_config)
+                response = self._generate_content(
+                    prompt, GEMINI_BATCH_MAX_OUTPUT_TOKENS, json_output=True
+                )
             except errors.ServerError as e:
                 print(
                     f"Batch summary failed ({e}); retrying in "
@@ -569,12 +666,14 @@ class YouTubeDigest:
                 )
                 self.retries[f"batch re-sent after {_failure_reason(e)}"] += 1
                 time.sleep(GEMINI_BATCH_RETRY_DELAY_SECONDS)
-                response = self._generate_content(prompt, gen_config)
+                response = self._generate_content(
+                    prompt, GEMINI_BATCH_MAX_OUTPUT_TOKENS, json_output=True
+                )
 
-            if not response or not response.text:
-                print("Empty response from Gemini for batch summary.")
+            if not response.text:
+                print("Empty response for batch summary.")
                 self._note_batch_failure(
-                    len(batch), "Gemini returned an empty response"
+                    len(batch), "the model returned an empty response"
                 )
                 return {}
 
@@ -596,7 +695,7 @@ class YouTubeDigest:
             }
 
         except json.JSONDecodeError as e:
-            if response is not None and self._was_truncated(response):
+            if response is not None and response.truncated:
                 print(
                     f"Batch summary was truncated (MAX_TOKENS) and produced invalid "
                     f"JSON: {e}. Falling back to per-video summaries for this batch."
@@ -631,7 +730,7 @@ class YouTubeDigest:
         """Strips optional markdown code fences (e.g. ```json ... ```) from text.
 
         Args:
-            text: The raw text returned by Gemini.
+            text: The raw text returned by the model.
 
         Returns:
             The text with any leading/trailing code fence markers removed.
@@ -786,10 +885,10 @@ class YouTubeDigest:
                 all_videos[v_id] = detail
                 total_videos += 1
 
-        # Summarize every video across every channel in as few Gemini calls as
+        # Summarize every video across every channel in as few model calls as
         # possible, instead of one call per video.
         if all_videos:
-            print(f"Summarizing {len(all_videos)} video(s) via batched Gemini calls...")
+            print(f"Summarizing {len(all_videos)} video(s) via batched model calls...")
             self.summarize_descriptions_batch(all_videos)
 
         # Build HTML
@@ -813,7 +912,7 @@ class YouTubeDigest:
             problems.append(
                 f"{failure_counts.total()} of {total_videos} video(s) have no summary"
             )
-        retries = [f"{count}x Gemini: {why}" for why, count in self.retries.items()]
+        retries = [f"{count}x Summaries: {why}" for why, count in self.retries.items()]
         retries += [
             f"{count}x YouTube API: HTTP {status}"
             for status, count in youtube_api.retries_by_status.items()
@@ -909,6 +1008,7 @@ def main() -> None:
     """
     required = {
         "YOUTUBE_API_KEY": environment.youtube_api_key(),
+        "ANTHROPIC_API_KEY": environment.anthropic_api_key(),
         "GEMINI_API_KEY": environment.gemini_api_key(),
         "GMAIL_USER": environment.gmail_user(),
         "GMAIL_APP_PASSWORD": environment.gmail_app_password(),

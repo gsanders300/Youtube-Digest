@@ -29,6 +29,8 @@ on:
     secrets:
       YOUTUBE_API_KEY:
         required: false
+      ANTHROPIC_API_KEY:
+        required: false
       GEMINI_API_KEY:
         required: false
       GMAIL_USER:
@@ -105,6 +107,7 @@ jobs:
           APPLY: ${{ inputs.apply }}
           DIGEST_SINCE: ${{ steps.since.outputs.since }}
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
@@ -166,7 +169,7 @@ jobs:
             - **Time:** ${time}
 
             ### Possible Causes
-            - Missing or invalid API keys (YouTube, Gemini)
+            - Missing or invalid API keys (YouTube, Anthropic, Gemini)
             - Gmail authentication issues
             - API quota exceeded
             - Network connectivity problems
@@ -174,7 +177,7 @@ jobs:
 
             ### How to Diagnose
             1. **Check the workflow logs:** ${run}
-            2. **Verify all secrets are set:** \`YOUTUBE_API_KEY\`, \`GEMINI_API_KEY\`, \`GMAIL_USER\`, \`GMAIL_APP_PASSWORD\`, \`RECIPIENT_EMAIL\`
+            2. **Verify all secrets are set:** \`YOUTUBE_API_KEY\`, \`ANTHROPIC_API_KEY\`, \`GEMINI_API_KEY\`, \`GMAIL_USER\`, \`GMAIL_APP_PASSWORD\`, \`RECIPIENT_EMAIL\`
             3. **Test locally:** \`uv run python digest.py\`
 
             ### Next Steps

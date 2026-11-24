@@ -78,7 +78,7 @@ The project uses pytest. The tests are in the `tests/` folder.
 `youtube_api.py` has the YouTube API code that all scripts share. Put new YouTube API logic in this file, not in a script.
 
 - `execute(request)` is the only way to run a request. It tries again with backoff after a rate limit or a server error. It does not try again after `quotaExceeded`.
-- `YouTubeDigest` gets its clients from its constructor: `YouTubeDigest(youtube=..., genai_client=...)`. The tests give mock clients this way.
+- `YouTubeDigest` gets its clients from its constructor: `YouTubeDigest(youtube=..., genai_client=..., anthropic_client=...)`. The tests give mock clients this way.
 
 ### 2.2 Channel list
 
@@ -108,13 +108,13 @@ Each caller uses only the steps that it can afford:
 The digest makes summaries in batches, not one video at a time.
 
 1. `YouTubeDigest.run` collects all new videos from all channels first.
-2. It calls `summarize_descriptions_batch`. That function puts the videos into groups of `GEMINI_BATCH_SIZE`. For each group, it asks Gemini for one JSON object that maps each video ID to its summary. After a Gemini server error (5xx), it waits `GEMINI_BATCH_RETRY_DELAY_SECONDS` and tries the group once more.
+2. It calls `summarize_descriptions_batch`. That function puts the videos into groups of `GEMINI_BATCH_SIZE`. For each group, it asks the model (Claude, then Gemini; see section 11) for one JSON object that maps each video ID to its summary. After a Gemini server error (5xx), it waits `GEMINI_BATCH_RETRY_DELAY_SECONDS` and tries the group once more.
 3. If a video is missing from the parsed response, or the request for the group fails, the digest calls `summarize_description` for that one video.
-4. After a model returns a per-day 429, `_generate_content` does not call that model again in the run (`exhausted_models`). `summarize_description` does not retry a 429. Without this, the per-video calls in step 3 use up the free-tier quota and then keep failing. On November 20, 2026, the 429 errors gave a free-tier limit of 20 requests per day and 5 per minute for each of `gemini-4-hydrogen` and `gemini-3.8-flash`. Before you change `GEMINI_MODEL`, make sure that its daily limit allows a day of per-video calls.
+4. After Gemini returns a per-day 429, `_generate_content` does not call it again in the run (`exhausted_models`). Later calls then show the Claude error that left the video without a summary. `summarize_description` does not retry a 429. Without this, the per-video calls in step 3 use up the free-tier quota and then keep failing. On November 20, 2026, the 429 errors gave a free-tier limit of 20 requests per day and 5 per minute for each of `gemini-4-hydrogen` and `gemini-3.8-flash`. Before you change `GEMINI_MODEL`, make sure that its daily limit allows a day of per-video calls.
 5. A video that gets no summary shows `Summary unavailable: <reason>.` (`_failure_reason`). The email shows a note at the top with the number of these videos and the reasons.
-6. Above the notes, the email shows a **Run status** box: the problems, every retry and its cause (`self.retries` for Gemini, `youtube_api.retries_by_status` for the YouTube API), and the number of videos that each model summarized (`self.answered_by`). If you add a retry or a fallback, record it in `self.retries`. If there is a problem, the subject ends in `[problems]`.
+6. Above the notes, the email shows a **Run status** box: the problems, every retry and its cause (`self.retries` for the summary models, `youtube_api.retries_by_status` for the YouTube API), and the number of videos that each model summarized (`self.answered_by`). If you add a retry or a fallback, record it in `self.retries`. If there is a problem, the subject ends in `[problems]`.
 
-Keep this batch-then-fallback structure. It keeps the number of Gemini calls low, and each video still gets a summary when Gemini can answer.
+Keep this batch-then-fallback structure. It keeps the number of model calls low, and each video still gets a summary when a model can answer.
 
 ### 2.5 Order of the videos in the email
 
@@ -167,7 +167,7 @@ Every module, class, and function must have a docstring. Use triple double quote
 ## 4. Errors and logging
 
 - Do not write a bare `except:` block. Catch specific exceptions.
-- Put network calls (YouTube API, Gmail SMTP, Gemini API) in `try...except` blocks.
+- Put network calls (YouTube API, Gmail SMTP, Claude API, Gemini API) in `try...except` blocks.
 - Scripts that run in GitHub Actions must print clear error messages.
 - If a required secret or setting is missing, stop early. Print a message that names the missing item.
 - Do not call `sys.exit()` in a utility function. Return an error value or raise an exception. Call `sys.exit()` only in `main()`.
@@ -179,6 +179,7 @@ Every module, class, and function must have a docstring. Use triple double quote
 - Do not write a secret in the code. Read secrets with the functions in `environment.py`.
 - The project needs these secrets:
   - `YOUTUBE_API_KEY`
+  - `ANTHROPIC_API_KEY`
   - `GEMINI_API_KEY`
   - `GMAIL_USER`
   - `GMAIL_APP_PASSWORD`
@@ -291,8 +292,10 @@ The `digest.py` script makes HTML for email clients. Email clients have limits. 
 
 - Before you add a feature, check if `pyproject.toml` and `uv.lock` need a change.
 - If you change `digest.py`, make sure the HTML is still valid for email clients (see section 9).
-- The Gemini prompts are written for the `gemini-3.5-flash-lite` model (`GEMINI_MODEL`). Keep them short and clear.
-- Every Gemini call goes through `YouTubeDigest._generate_content`. It tries `GEMINI_MODEL` and, on a `google.genai.errors.APIError` or an `httpx2.TimeoutException`, tries `GEMINI_FALLBACK_MODEL` (`gemini-3.8-flash`) once with the same prompt and config. Each request times out after `GEMINI_TIMEOUT_SECONDS`. The SDK uses `httpx2`, so `httpx2` is a direct dependency.
+- The prompts are written for `claude-haiku-5-5` (`CLAUDE_MODEL`) and `gemini-3.5-flash-lite` (`GEMINI_MODEL`). Keep them short and clear.
+- Every model call goes through `YouTubeDigest._generate_content`. It calls `CLAUDE_MODEL` at `CLAUDE_EFFORT` (`high`). On an `anthropic.APIError` (timeouts included) or a refusal (`ClaudeRefusalError`), it tries `GEMINI_MODEL` once with the same prompt. Both return a `Generation` (text, and whether the token limit cut it off).
+- Claude thinks before it answers, and the thinking counts against `max_tokens`, so each Claude request adds `CLAUDE_THINKING_TOKENS` to the output budget. Do not send `temperature` to Claude: Haiku 5.5 rejects non-default sampling values.
+- The Claude client has `max_retries=0`, so a failure fails over to Gemini at once and every retry shows in the run status. Claude requests time out after `CLAUDE_TIMEOUT_SECONDS`, Gemini requests after `GEMINI_TIMEOUT_SECONDS`. Both SDKs use `httpx2`, so `httpx2` is a direct dependency.
 - Run `uvx ruff format .` and `uvx ruff check .` before you finish a change.
 - If you make a new file, give it a `snake_case` name, a module docstring, and type hints.
 - Do not remove the `if __name__ == "__main__":` block from a script.

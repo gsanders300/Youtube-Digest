@@ -7,6 +7,11 @@ def youtube_api_key() -> str:
     return os.environ.get("YOUTUBE_API_KEY", "")
 
 
+def anthropic_api_key() -> str:
+    """Returns the Anthropic (Claude) API key from environment variables."""
+    return os.environ.get("ANTHROPIC_API_KEY", "")
+
+
 def gemini_api_key() -> str:
     """Returns the Gemini API key from environment variables."""
     return os.environ.get("GEMINI_API_KEY", "")

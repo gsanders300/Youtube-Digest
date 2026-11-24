@@ -6,7 +6,7 @@
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue)](https://www.python.org/downloads/)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json)](https://github.com/astral-sh/uv)
 
-Youtube-Digest is a Python tool. It runs in GitHub Actions. Each day, it sends one email to you. The email lists the new videos from the YouTube channels that you select. Gemini AI writes a short summary of each video.
+Youtube-Digest is a Python tool. It runs in GitHub Actions. Each day, it sends one email to you. The email lists the new videos from the YouTube channels that you select. Claude writes a short summary of each video. If Claude fails, Gemini writes it.
 
 This document tells you how to install the tool, how to configure it, and how to run each command.
 
@@ -35,11 +35,16 @@ The next steps are optional. Do them only if you want to import your YouTube sub
 
 **CAUTION:** Do not commit `client_secrets.json` to git. The file contains a secret.
 
-### 1.2 Google AI Studio (Gemini API)
+### 1.2 Claude API and Gemini API
 
-1. Go to [Google AI Studio](https://aistudio.google.com/).
-2. Select **Get API key**. Make a new key.
-3. Store the key in GitHub Secrets with the name `GEMINI_API_KEY`.
+The tool uses Claude to write the summaries. It uses Gemini when Claude fails.
+
+1. Go to the [Claude Console](https://platform.claude.com/).
+2. Go to **API keys**. Make a new key.
+3. Store the key in GitHub Secrets with the name `ANTHROPIC_API_KEY`.
+4. Go to [Google AI Studio](https://aistudio.google.com/).
+5. Select **Get API key**. Make a new key.
+6. Store the key in GitHub Secrets with the name `GEMINI_API_KEY`.
 
 ### 1.3 Gmail
 
@@ -60,7 +65,8 @@ The tool sends the email through your Gmail account. Gmail needs an app password
 | Secret | Content | Used by |
 |---|---|---|
 | `YOUTUBE_API_KEY` | YouTube Data API key | Daily digest, Repair Channel IDs, Add Channel |
-| `GEMINI_API_KEY` | Gemini API key | Daily digest |
+| `ANTHROPIC_API_KEY` | Claude API key | Daily digest |
+| `GEMINI_API_KEY` | Gemini API key (used when Claude fails) | Daily digest |
 | `GMAIL_USER` | Your Gmail address | Daily digest |
 | `GMAIL_APP_PASSWORD` | Gmail app password | Daily digest |
 | `RECIPIENT_EMAIL` | Address that receives the digest | Daily digest |
@@ -99,7 +105,7 @@ The scripts read their keys from environment variables. You can store the keys i
    ```
    YOUTUBE_API_KEY=your-key
    ```
-3. To run the digest on your computer, also add `GEMINI_API_KEY`, `GMAIL_USER`, `GMAIL_APP_PASSWORD`, and `RECIPIENT_EMAIL`.
+3. To run the digest on your computer, also add `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GMAIL_USER`, `GMAIL_APP_PASSWORD`, and `RECIPIENT_EMAIL`.
 4. Save the file.
 5. Put `--env-file .env` after `uv run` in each command. Example:
    ```bash
@@ -212,9 +218,9 @@ You can also run this from GitHub. Use the **Add Channel** workflow (see section
 
 ### 4.1 Send the digest
 
-The digest needs these environment variables: `YOUTUBE_API_KEY`, `GEMINI_API_KEY`, `GMAIL_USER`, `GMAIL_APP_PASSWORD`, and `RECIPIENT_EMAIL`.
+The digest needs these environment variables: `YOUTUBE_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `GMAIL_USER`, `GMAIL_APP_PASSWORD`, and `RECIPIENT_EMAIL`.
 
-1. Make sure the five variables are in your `.env` file (see section 2.1).
+1. Make sure the six variables are in your `.env` file (see section 2.1).
 2. Run the digest.
    ```bash
    uv run --env-file .env python digest.py
@@ -266,7 +272,7 @@ Dependabot keeps the dependencies up to date. Every Saturday at 3am ET, it opens
 
 | Workflow name | What it does | Input | Secrets that it needs |
 |---|---|---|---|
-| YouTube Daily Digest | Sends the digest email. | None | All five digest secrets |
+| YouTube Daily Digest | Sends the digest email. | None | All six digest secrets |
 | Update Subscriptions | Adds your current subscriptions to `channels.yml` and updates their entries. Commits the file. | None | `YOUTUBE_CREDENTIALS` |
 | Repair Channel IDs | Checks the channel IDs. If you select **apply**, it corrects the file and commits it. | `apply` (checkbox) | `YOUTUBE_API_KEY` |
 | Add Channel | Adds one channel from a URL. Commits the file. | `url` (text) | `YOUTUBE_API_KEY` |
@@ -320,6 +326,7 @@ Each workflow in the private repository calls the reusable workflow `.github/wor
          task: digest
        secrets:
          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
          GMAIL_USER: ${{ secrets.GMAIL_USER }}
          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
@@ -368,9 +375,9 @@ Run these commands from the root folder of the project.
 
 This section is for reference. You do not need to read it to use the tool.
 
-- **Summaries.** The tool uses the `gemini-3.5-flash-lite` model. If Gemini returns an API error for that model, or doesn't answer within 60 seconds, the tool tries the same request on `gemini-3.8-flash`. It sends several videos to Gemini in one request. If Gemini does not return a summary for a video, the tool asks again for that one video. If the request fails (for example, the model is overloaded or the free-tier daily limit is used up), the video shows `Summary unavailable` and the reason, and a note at the top of the email gives the number of videos without a summary.
+- **Summaries.** The tool uses the `claude-haiku-5-5` model at high effort. If Claude returns an API error, doesn't answer within 120 seconds, or refuses, the tool tries the same request on `gemini-3.5-flash-lite`. It sends several videos to the model in one request. If the model does not return a summary for a video, the tool asks again for that one video. If the request fails (for example, the model is overloaded or the free-tier daily limit is used up), the video shows `Summary unavailable` and the reason, and a note at the top of the email gives the number of videos without a summary.
 - **Channels that the tool cannot check.** If a channel has a bad handle, no uploads playlist, or an API error, the tool continues with the other channels. The email shows a note with the names of the channels that it could not check, and the HTTP status and reason for each API error.
-- **Run status.** The top of every email has a **Run status** box. It shows the problems in the run (or "None"), each retry and its cause (Gemini and YouTube API), and the number of videos that each Gemini model summarized. If there was a problem, the subject ends in `[problems]`.
+- **Run status.** The top of every email has a **Run status** box. It shows the problems in the run (or "None"), each retry and its cause (summary models and YouTube API), and the number of videos that each model summarized. If there was a problem, the subject ends in `[problems]`.
 - **Duplicate entries.** If two entries have the same uploads playlist, the tool uses only the first entry.
 - **Wrong playlist IDs.** If a stored uploads playlist ID is wrong, the API returns `playlistNotFound`. The tool then finds the channel again from its `@handle`, then from its stored channel ID. It makes sure that the new playlist works, and then it continues. The tool does not write the correction to `channels.yml`. To correct the file, run the repair tool (see section 4.2).
 - **API errors.** If the YouTube API returns a rate limit error or a server error, the tool waits and tries again. It tries again up to three times. All the scripts do this. If the API returns `quotaExceeded`, the tool does not try again. The quota resets each day.
